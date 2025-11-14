@@ -1,25 +1,39 @@
-# ======================================================================================================================
+ ======================================================================================================================
 # CONFIG
 # ======================================================================================================================
-                                                  # Tenor API key (optional). If empty, the code will only use the local FALLBACK_GIFS.
-TENOR_API_KEY ="AIzaSyA-zr6XaXQIjkcpEAfMALzujwD0jEnqt7o"                                            TENOR_SEARCH_URL = "https://tenor.googleapis.com/v2/search"
-TENOR_REQUEST_LIMIT = 20 # request up to 20 gifs per search when using Tenor                        
+
+# Tenor API key (optional). If empty, the code will only use the local FALLBACK_GIFS.
+TENOR_API_KEY ="AIzaSyA-zr6XaXQIjkcpEAfMALzujwD0jEnqt7o" 
+TENOR_SEARCH_URL = "https://tenor.googleapis.com/v2/search" 
+TENOR_REQUEST_LIMIT = 20 # request up to 20 gifs per search when using Tenor
+
 # Per-user per-action cooldown (seconds)
 COOLDOWN_SECONDS = 3
-                                                  # Maximum GIFs to consider per action (safety)
-MAX_GIF_CANDIDATES = 20                                                                             # HTTP timeout seconds
+
+# Maximum GIFs to consider per action (safety)
+MAX_GIF_CANDIDATES = 20
+
+# HTTP timeout seconds
 HTTP_TIMEOUT = 18
-                                                  # Recent GIF retention per guild to avoid repeats
+
+# Recent GIF retention per guild to avoid repeats
 RECENT_GIF_RETENTION = 80
 
-# Maximum number of reactions to add              MAX_REACTIONS = 2
-                                                  # Colors used for embeds (pastel palette)
+# Maximum number of reactions to add
+MAX_REACTIONS = 2
+
+# Colors used for embeds (pastel palette)
 PASTEL_COLORS = [
     0xA8D5E2, 0xD1B3E6, 0xF7C6C7, 0xC7F3D0,
-    0xFFF2B2, 0xC6E7FF, 0xE8C6FF, 0xFFE4E6        ]
+    0xFFF2B2, 0xC6E7FF, 0xE8C6FF, 0xFFE4E6
+]
 
-# Fallback/generic gifs for any action when other lists fail                                        GENERIC_FALLBACK_GIFS = [                             "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif",
-    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",                                            "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",                                            "https://media.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
+# Fallback/generic gifs for any action when other lists fail
+GENERIC_FALLBACK_GIFS = [
+    "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif",
+    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+    "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+    "https://media.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
     "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
     "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
     "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
@@ -28,7 +42,7 @@ PASTEL_COLORS = [
     "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif"
 ]
 
-#======================================================================================================================
+# ======================================================================================================================
 # IMPORTS
 # ======================================================================================================================
 import asyncio
@@ -90,16 +104,17 @@ _STORE_LOCK = asyncio.Lock()
 ACTIONS = [
     "hug", "slap", "pat", "kiss", "cuddle", "boop", "highfive", "poke", "bite", "tickle",
     "punch", "kick", "dance", "cry", "blush", "wave", "bonk", "stare", "laugh", "smug",
-    "sleep", "holdhands", "feed", "throw", "run", "scared", "comfort", "tease"
+    "sleep", "holdhands", "feed", "throw", "run", "scared", "comfort", "tease",
+    "kill", "yeet", "shoot", "explode", "stab", "revive"
 ]
 
 # Reaction emojis mapping per action for after-send flair
 ACTION_REACTIONS: Dict[str, List[str]] = {
-    "hug": ["�", "💞"],
+    "hug": ["🫶", "💞"],
     "slap": ["😲", "👋"],
     "pat": ["😊", "🤏"],
     "kiss": ["😘", "💋"],
-    "cuddle": ["🥰", "�"],
+    "cuddle": ["🥰", "🫶"],
     "boop": ["👉", "👈"],
     "highfive": ["🙌", "✋"],
     "poke": ["😛", "👉"],
@@ -112,7 +127,7 @@ ACTION_REACTIONS: Dict[str, List[str]] = {
     "blush": ["😊", "😳"],
     "wave": ["👋", "🤙"],
     "bonk": ["🔨", "😵"],
-    "stare": ["👀", "�"],
+    "stare": ["👀", "🫥"],
     "laugh": ["😆", "🤣"],
     "smug": ["😏", "😼"],
     "sleep": ["😴", "🛌"],
@@ -122,7 +137,13 @@ ACTION_REACTIONS: Dict[str, List[str]] = {
     "run": ["🏃", "💨"],
     "scared": ["😱", "😨"],
     "comfort": ["🤗", "🫂"],
-    "tease": ["😝", "😜"]
+    "tease": ["😝", "😜"],
+    "kill": ["💀", "⚔️"],
+    "yeet": ["💨", "🚀"],
+    "shoot": ["🔫", "💥"],
+    "explode": ["💣", "🔥"],
+    "stab": ["🗡️", "💢"],
+    "revive": ["✨", "💫"],
 }
 
 # pastel colors per action for nicer embeds
@@ -132,7 +153,7 @@ for i, action in enumerate(ACTIONS):
 # cute suffixes to add Owo flavor
 CUTE_SUFFIXES = [
     "uwu", "owo", "nya~", ">w<", ".w.", "^_^", "♥", "💖", "✨", "｡◕‿◕｡",
-    "owo~", "♡", "🌸", "�", "💫", "♥️"
+    "owo~", "♡", "🌸", "🫶", "💫", "♥️"
 ]
 
 # ======================================================================================================================
@@ -477,7 +498,67 @@ FALLBACK_GIFS: Dict[str, List[str]] = {
         "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
         "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
         "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
-    ]
+    ],
+"kill": [
+    "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+    "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+    "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+    "https://media.giphy.com/media/l3vR6D5Q4Z8d2/giphy.gif",
+    "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+    "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+    "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+    "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif"
+],
+"yeet": [
+    "https://media.giphy.com/media/13CoXDiaCcCoyk/giphy.gif",
+    "https://media.giphy.com/media/3o7TKx3S1KMK1nXyLe/giphy.gif",
+    "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+    "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+    "https://media.giphy.com/media/2YbG2d4pXQGXS/giphy.gif",
+    "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+    "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+    "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+    "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif"
+],
+"shoot": [
+    "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    "https://media.giphy.com/media/10UeedrT5MIfPG/giphy.gif",
+    "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+    "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+    "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+    "https://media.giphy.com/media/xT0Gqd2hM4bCj3Q3D6/giphy.gif",
+    "https://media.giphy.com/media/l3vR6D5Q4Z8d2/giphy.gif",
+    "https://media.giphy.com/media/fO6UtDy5pWYwM/giphy.gif",
+    "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+    "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif"
+],
+"stab": [
+    "https://media.giphy.com/media/11rWoZNpAKw8w/giphy.gif",
+    "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+    "https://media.giphy.com/media/l3vR6D5Q4Z8d2/giphy.gif",
+    "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+    "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+    "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+    "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+],
+"revive": [
+    "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    "https://media.giphy.com/media/13YrHUvPzUUmkM/giphy.gif",
+    "https://media.giphy.com/media/QGc8RgR0J5Na/giphy.gif",
+    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+    "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+    "https://media.giphy.com/media/3o6Zt6ML6BklcajjsA/giphy.gif",
+    "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+    "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+    "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+    "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+]
 }
 
 # ======================================================================================================================
@@ -993,7 +1074,80 @@ CAPTION_TEMPLATES: Dict[str, List[str]] = {
         "{author} rib-tickles {target} with teasing words.",
         "{author} teases {target} and laughs.",
         "{author} teases {target} in a cute way."
-    ]
+    ],
+"kill": [
+    "{author} annihilates {target} dramatically!",
+    "{author} finishes {target} with anime energy {suffix}",
+    "{author} strikes {target} down like a boss.",
+    "{author} deletes {target} from existence.",
+    "{author} kills {target} but in a funny way.",
+    "{author} unleashes final blow on {target}.",
+    "{author} taps {target} — instant defeat.",
+    "{author} one-shots {target} effortlessly.",
+    "{author} ends {target}'s arc instantly.",
+    "{author} defeats {target} with style."
+],
+"yeet": [
+    "{author} yeets {target} across the universe!",
+    "{author} grabs {target} and YEETS them {suffix}",
+    "{author} sends {target} flying like a rocket.",
+    "{author} yeets {target} out of the server.",
+    "{author} yeets {target} so hard physics quits.",
+    "{author} yeets {target} with anime power.",
+    "{author} launches {target} into orbit.",
+    "{author} says YEET and {target} disappears.",
+    "{author} catapults {target} dramatically.",
+    "{author} yeets {target} with full force."
+],
+"shoot": [
+    "{author} shoots at {target} anime-style!",
+    "{author} fires a beam attack at {target} {suffix}",
+    "{author} snipes {target} dramatically.",
+    "{author} shoots {target} with cartoon SFX.",
+    "{author} fires at {target} but misses cutely.",
+    "{author} unloads anime bullets on {target}.",
+    "{author} pew-pews {target} aggressively.",
+    "{author} shoots {target} with energy blast.",
+    "{author} blasts {target} into smoke.",
+    "{author} shoots {target} in slow motion."
+],
+"explode": [
+    "{author} blows up {target} — KABOOM!",
+    "{author} triggers anime explosion on {target} {suffix}",
+    "{author} throws {target} into an explosion.",
+    "{author} goes *boom* on {target}.",
+    "{author} detonates {target} for fun.",
+    "{author} explodes {target} dramatically.",
+    "{author} sets {target} on blast-mode.",
+    "{author} makes {target} disappear in fire.",
+    "{author} presses button — {target} goes boom.",
+    "{author} nukes {target}'s soul (playfully)."
+],
+"stab": [
+    "{author} stabs {target} like an anime ninja!",
+    "{author} pokes {target} with a dagger {suffix}",
+    "{author} stabs {target} dramatically.",
+    "{author} slices {target} lightly (funny way).",
+    "{author} ninja-stabs {target}.",
+    "{author} stabs {target} with sparkle effects.",
+    "{author} stabs {target} and smirks.",
+    "{author} sneak-attacks {target}.",
+    "{author} stabs {target} but it's cartoonish.",
+    "{author} stabs {target} in slow motion."
+],
+
+"revive": [
+    "{author} revives {target} with magic!",
+    "{author} brings {target} back to life {suffix}",
+    "{author} heals {target} with sparkly power.",
+    "{author} resurrects {target} dramatically.",
+    "{author} revives {target} like an RPG healer.",
+    "{author} casts revive spell on {target}.",
+    "{author} restores {target}'s HP fully.",
+    "{author} gently revives {target}.",
+    "{author} saves {target} from death.",
+    "{author} brings {target} back from the void."
+]
 }
 
 # ======================================================================================================================
@@ -1228,7 +1382,7 @@ def build_help_embed() -> discord.Embed:
     embed = discord.Embed(title=title, description=desc, color=random.choice(PASTEL_COLORS))
     # categories
     soft = ["hug", "pat", "cuddle", "kiss", "holdhands", "comfort", "feed", "boop"]
-    actiony = ["slap", "punch", "kick", "bonk", "bite", "throw", "run", "punch"]
+    actiony = ["slap", "punch", "kick", "bonk", "bite", "throw", "run", "punch","kill","yeet","shoot","explode","stab","revive"]
     playful = ["tickle", "tease", "poke", "highfive", "laugh", "dance", "smug"]
     mood = ["cry", "blush", "wave", "stare", "scared", "sleep"]
     # add fields
@@ -1271,11 +1425,24 @@ async def handle_message_event(message: discord.Message) -> None:
             embed = build_help_embed()
             await message.channel.send(embed=embed)
         except Exception:
-            try:                                                  await message.channel.send("D.S.O Fun Commands:\n" + ", ".join(ACTIONS))
-            except Exception:                                     pass                                      return                                                                                          # Try no-space pattern: hug@user or dso hug@user
-    m = ACTION_PATTERN_NO_SPACE.match(content)        if m:                                                 action = m.group("action").lower()                token = m.group("target")                         member = await resolve_member(message.guild, token)                                                 if member:
-            # open a session for Tenor (if needed)            if TENOR_API_KEY:                                     async with aiohttp.ClientSession() as session:
-                    await send_owo_style(message.channel, message.author, member, action, session=session)                                                        else:
+            try:
+                await message.channel.send("D.S.O Fun Commands:\n" + ", ".join(ACTIONS))
+            except Exception:
+                pass
+        return
+
+    # Try no-space pattern: hug@user or dso hug@user
+    m = ACTION_PATTERN_NO_SPACE.match(content)
+    if m:
+        action = m.group("action").lower()
+        token = m.group("target")
+        member = await resolve_member(message.guild, token)
+        if member:
+            # open a session for Tenor (if needed)
+            if TENOR_API_KEY:
+                async with aiohttp.ClientSession() as session:
+                    await send_owo_style(message.channel, message.author, member, action, session=session)
+            else:
                 await send_owo_style(message.channel, message.author, member, action, session=None)
             return
 
@@ -1285,19 +1452,27 @@ async def handle_message_event(message: discord.Message) -> None:
         action = m2.group("action").lower()
         token = m2.group("target")
         member = await resolve_member(message.guild, token)
-        if member:                                            if TENOR_API_KEY:
+        if member:
+            if TENOR_API_KEY:
                 async with aiohttp.ClientSession() as session:
-                    await send_owo_style(message.channel, message.author, member, action, session=session)                                                        else:
+                    await send_owo_style(message.channel, message.author, member, action, session=session)
+            else:
                 await send_owo_style(message.channel, message.author, member, action, session=None)
-            return                                
-    # No fun match found — ignore                     return
+            return
+
+    # No fun match found — ignore
+    return
 
 # ======================================================================================================================
-# EXTRA: optional command to list all actions as plain text (for environments where embeds fail)    # ======================================================================================================================                              async def send_plain_actions_list(channel: discord.TextChannel) -> None:
+# EXTRA: optional command to list all actions as plain text (for environments where embeds fail)
+# ======================================================================================================================
+async def send_plain_actions_list(channel: discord.TextChannel) -> None:
     try:
         text = "D.S.O Fun Actions:\n" + ", ".join(ACTIONS)
-        await channel.send(text)                      except Exception:
-        pass                                      
+        await channel.send(text)
+    except Exception:
+        pass
+
 # ======================================================================================================================
 # UTILITY: convenience function to quickly test this module
 # (Only used if someone runs this file directly - not recommended in production)
@@ -1308,6 +1483,10 @@ if __name__ == "__main__":
     print(f"This fun module defines {len(ACTIONS)} actions and includes at least 10 gifs per action.")
     # Print a short sample of GIFs for quick verification
     for act in ACTIONS:
-        print(f"{act}: {len(FALLBACK_GIFS.get(act, []))} gifs (sample: {FALLBACK_GIFS.get(act, [GENERIC_FALLBACK_GIFS[0]])[0]})")                     
+        print(f"{act}: {len(FALLBACK_GIFS.get(act, []))} gifs (sample: {FALLBACK_GIFS.get(act, [GENERIC_FALLBACK_GIFS[0]])[0]})")
+
 # ======================================================================================================================
-# END OF FILE (fun.py)                            # ======================================================================================================================
+# END OF FILE (fun.py)
+# ======================================================================================================================
+
+
