@@ -1,4 +1,34 @@
 # ======================================================================================================================
+# CONFIG
+# ======================================================================================================================
+                                                  # Tenor API key (optional). If empty, the code will only use the local FALLBACK_GIFS.
+TENOR_API_KEY ="AIzaSyA-zr6XaXQIjkcpEAfMALzujwD0jEnqt7o"                                            TENOR_SEARCH_URL = "https://tenor.googleapis.com/v2/search"
+TENOR_REQUEST_LIMIT = 20 # request up to 20 gifs per search when using Tenor                        
+# Per-user per-action cooldown (seconds)
+COOLDOWN_SECONDS = 3
+                                                  # Maximum GIFs to consider per action (safety)
+MAX_GIF_CANDIDATES = 20                                                                             # HTTP timeout seconds
+HTTP_TIMEOUT = 18
+                                                  # Recent GIF retention per guild to avoid repeats
+RECENT_GIF_RETENTION = 80
+
+# Maximum number of reactions to add              MAX_REACTIONS = 2
+                                                  # Colors used for embeds (pastel palette)
+PASTEL_COLORS = [
+    0xA8D5E2, 0xD1B3E6, 0xF7C6C7, 0xC7F3D0,
+    0xFFF2B2, 0xC6E7FF, 0xE8C6FF, 0xFFE4E6        ]
+
+# Fallback/generic gifs for any action when other lists fail                                        GENERIC_FALLBACK_GIFS = [                             "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif",
+    "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",                                            "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",                                            "https://media.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
+    "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+    "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+    "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+    "https://media.giphy.com/media/1BXa2alBjrCXC/giphy.gif",
+    "https://media.giphy.com/media/2YbG2d4pXQGXS/giphy.gif",
+    "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif"
+]
+
+#======================================================================================================================
 # IMPORTS
 # ======================================================================================================================
 import asyncio
