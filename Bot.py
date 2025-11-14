@@ -1,40 +1,58 @@
-# ------------------------------------------------------------------------------------
-# D.S.O BOT — Main Launcher (Linked with Fun.py)
-# Version 1.2 • Demon Dev • Powered by DEMON'S SERVER
-# ------------------------------------------------------------------------------------
-# Description:
-#   This is the main startup file for your D.S.O BOT.
-#   It imports the full Fun Command System (Auto-Tenor Edition)
-#   from fun.py and starts the bot from there.
-#
-# Folder structure example:
-#   D_S_O_BOT/
-#   ├── bot.py
-#   ├── fun.py
-#   ├── actions.json
-#   ├── fun_config.json
-#   ├── fun_stats.json
-#   ├── favorites.json
-#   └── suggestions.json
-# ------------------------------------------------------------------------------------
+# bot.py                                          # D.S.O BOT — Main Core File
+# This file links directly with fun.py and runs your full fun command system.                       # Version: v3.0 (Offline Owo Engine Edition)      # Author: Senor (for Demon)
+                                                  import discord                                    import asyncio                                    import logging                                    from fun import handle_message_event   # 👈 connects fun.py here                                                                                      # Optional: enable simple logs
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')                                                                         # ======================================================================================================================                              # CONFIGURATION
+# ======================================================================================================================
 
-from fun import start_fun_system  # import function from fun.py
+# 🔑 Your bot token here
+TOKEN = ""
 
-# ------------------------------------------------------------------------------------
-# MAIN BOT LAUNCHER
-# ------------------------------------------------------------------------------------
-def main():
-    print("🚀 Starting D.S.O BOT (linked with fun.py)...")
+# Discord intents
+intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
+intents.message_content = True
+intents.members = True
 
-    # Start the bot instance from fun.py
-    bot = start_fun_system()
+# Create client
+client = discord.Client(intents=intents)
 
-    # Run the bot — make sure your token is inside fun.py
-    bot.run("YOUR_DISCORD_BOT_TOKEN")  # <-- Replace this or keep it empty if set inside fun.py
+# ======================================================================================================================
+# EVENTS
+# ======================================================================================================================
 
+@client.event
+async def on_ready():
+    """
+    Called when the bot is connected and ready.
+    """
+    print(f"[DSO INFO] Logged in as {client.user} (id: {client.user.id})")
+    print("[DSO INFO] D.S.O Fun Engine ready to roll 😈")
 
-# ------------------------------------------------------------------------------------
-# ENTRY POINT
-# ------------------------------------------------------------------------------------
+@client.event
+async def on_message(message: discord.Message):
+    """
+    Called when a message is sent in any channel the bot can read.
+    Forwards every message to fun.py for processing.
+    """
+    try:
+        await handle_message_event(message)
+    except Exception as e:
+        print(f"[DSO ERROR] Unhandled exception in on_message: {e}")
+
+# ======================================================================================================================
+# RUN THE BOT
+# ======================================================================================================================
+
 if __name__ == "__main__":
-    main()
+    print("[DSO INFO] Starting D.S.O Bot Core...")
+    try:
+        client.run(TOKEN)
+    except KeyboardInterrupt:
+        print("[DSO INFO] Shutting down (Ctrl+C pressed).")
+    except Exception as e:
+        print(f"[DSO ERROR] Failed to start bot: {e}")
+
+# ======================================================================================================================
+# END OF FILE (bot.py)
+# ======================================================================================================================
