@@ -1,975 +1,1283 @@
-# Fun.py — D.S.O BOT — Fun Command System v1.2 (Auto-Tenor Edition)
-# ------------------------------------------------------------------------------------
-# Upgrades from v1.1:
-#   • Automatic Tenor fetching on every action (OWO-like), with small persistent cache.
-#   • OWO-style captions: "<Author> <action>s <Target>!! <random tail>"
-#   • Sender avatar displayed in embed author (circular in Discord UI).
-#   • Prefers 1:1 (square) Tenor GIFs when available; otherwise falls back.
-#   • Footer updated exactly as requested.
-#
-# Requirements (Python 3.10+):
-#   pip install -U discord.py aiohttp
-#
-# Configure secrets (RECOMMENDED via environment):
-#   export DISCORD_BOT_TOKEN="xxx"
-#   export TENOR_API_KEY="xxx"
-# ------------------------------------------------------------------------------------
-
+# ======================================================================================================================
+# IMPORTS
+# ======================================================================================================================
 import asyncio
-import json
-import os
-import random
-import re
-import time
-from collections import Counter, defaultdict
-from typing import Dict, List, Optional, Tuple
-
 import aiohttp
 import discord
-from discord.ext import commands
+import re
+import random
+import time
+import json
+import os
+from typing import List, Optional, Tuple, Dict, Any
 
-# ------------------------------------------------------------------------------------
-# Tokens (env first, fallback to literals if you prefer)
-# ------------------------------------------------------------------------------------
-DISCORD_BOT_TOKEN=""
-TENOR_API_KEY="AIzaSyA-zr6XaXQIjkcpEAfMALzujwD0jEnqt7o"
+# ======================================================================================================================
+# CLIENT-SIDE NOTES
+# ======================================================================================================================
+# This module exposes `handle_message_event(message)` which your main bot should call.
+# It intentionally does NOT call client.run() to keep integration flexible.
+#
+# Example in bot.py:
+#   import discord
+#   from fun import handle_message_event
+#
+#   client = discord.Client(intents=discord.Intents.default())
+#
+#   @client.event
+#   async def on_ready():
+#       print("Bot ready")
+#
+#   @client.event
+#   async def on_message(message):
+#       await handle_message_event(message)
+#
+#   client.run(TOKEN)
+#
+# ======================================================================================================================
+# GLOBAL DATA STRUCTURES
+# ======================================================================================================================
 
-# ------------------------------------------------------------------------------------
-# Constants / Files
-# ------------------------------------------------------------------------------------
-ACTIONS_FILE      = "actions.json"        # { action_name: {"gifs":[url,...], "aliases":[...]} }
-GUILD_FILE        = "fun_config.json"     # { str(gid): {"enabled":bool,"fun_channel":id,"auto_react":bool,"cooldown":int} }
-STATS_FILE        = "fun_stats.json"      # { "global":{"uses":int,"actions":{name:int}}, "guilds":{gid:{...}}, "users":{uid:{"uses":int}} }
-FAVS_FILE         = "favorites.json"      # { str(uid): { action: [gif_url,...] } }
-SUGGEST_FILE      = "suggestions.json"    # [ {"guild":gid,"user":uid,"action":"...","time":epoch} ]
+# cooldown store: {(user_id, action): last_timestamp}
+_COOLDOWNS: Dict[Tuple[int, str], float] = {}
 
-EMBED_FOOTER      = "Version 1.2 • Demon Dev • Powered by DEMON'S SERVER"
+# per-guild recent GIF list to avoid immediate repeats
+_RECENT_GIFS: Dict[str, List[str]] = {}  # key is str(guild_id) -> list of gif urls most recent first
 
-# Seed actions (admins can add more with add-action / alias)
-DEFAULT_ACTION_NAMES = [
-    "hug", "kiss", "slap", "punch", "pat",
-    "poke", "dance", "cry", "laugh", "blush",
-    "cuddle", "wink", "highfive", "kick", "bonk",
-    "stare", "wave", "bite", "smug", "sleep",
-    "handhold", "cheer", "sip", "tease", "boop",
-    "headpat", "nom", "clap", "spin", "glare",
-    "apologize", "thank", "salute", "bark", "meow",
-    "hide", "peek", "spin2", "spin3", "flex",
-    "twerk", "chill", "vibe", "confess", "protect"
+# embed pastel color per action mapping can be customized below
+ACTION_COLORS: Dict[str, int] = {}
+
+# small in-memory Tenor cache to reduce repeated API calls {query: (ts, [urls])}
+_TENOR_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+CACHE_TTL = 60 * 5  # 5 minutes cache TTL
+
+# lock for store persistence (if we add any small disk store later)
+_STORE_LOCK = asyncio.Lock()
+
+# ======================================================================================================================
+# ACTION DEFINITIONS
+# ======================================================================================================================
+# Primary action list (we will provide many actions; the user asked for many)
+ACTIONS = [
+    "hug", "slap", "pat", "kiss", "cuddle", "boop", "highfive", "poke", "bite", "tickle",
+    "punch", "kick", "dance", "cry", "blush", "wave", "bonk", "stare", "laugh", "smug",
+    "sleep", "holdhands", "feed", "throw", "run", "scared", "comfort", "tease"
 ]
 
-# Big auto-reaction pool (80+)
-REACTION_POOL = [
-    "❤️","😂","😳","💀","🔥","✨","😼","😎","🤝","🎭",
-    "😏","😇","🤡","🙃","😈","👀","😱","🥶","🤯","🫠",
-    "🫡","🤌","🙏","🙌","👏","💯","🎯","🌶️","🍿","🧨",
-    "🎉","🥳","🤗","🥹","😤","😮‍💨","😌","😴","😪","🫶",
-    "💘","💫","⚡","🌟","🌈","💥","🫵","🫣","🫢","🫡",
-    "🤝","🤍","💙","💚","💛","🧡","💜","🖤","🤎","🩷",
-    "🩵","🩶","💢","💤","💬","🗯️","🔔","🔊","🎶","🎵",
-    "🥷","🦾","🦿","🦄","🐉","🪽","🐱","🐶","🐧","🦊",
-    "🍭","🍩","🍔","🍟","🍕","🌮","🍜","🍣","🍫","☕"
-]
-
-# ------------------------------------------------------------------------------------
-# OWO-style caption tails per action (short, expressive)
-# ------------------------------------------------------------------------------------
-CAPTION_TAILS: Dict[str, List[str]] = {
-    "hug": [
-        "Don't squeeze too hard!", "So warm!", "Aww, that's adorable!",
-        "Tight and cozy!", "Such a wholesome hug!"
-    ],
-    "kiss": [
-        "So sweet!", "Mwah~", "Love is in the air!",
-        "Blushing intensifies!", "Too cute!"
-    ],
-    "slap": [
-        "Ouch!! That must’ve hurt!", "That’s gotta sting!", "Someone’s mad!",
-        "Yikes!", "That left a mark!"
-    ],
-    "pat": [
-        "There there~", "Good job!", "Such a gentle pat!",
-        "Headpats for the win!", "So comfy!"
-    ],
-    "bonk": [
-        "Bonk! Go to horny jail!", "Behave!", "Stay wholesome!",
-        "That was deserved!", "Discipline time!"
-    ],
-    # Fallback defaults used for any action not listed above
-    "_default": [
-        "That's cute!", "Wow!", "How sweet!", "Legendary!", "Nice one!"
-    ],
+# Reaction emojis mapping per action for after-send flair
+ACTION_REACTIONS: Dict[str, List[str]] = {
+    "hug": ["�", "💞"],
+    "slap": ["😲", "👋"],
+    "pat": ["😊", "🤏"],
+    "kiss": ["😘", "💋"],
+    "cuddle": ["🥰", "�"],
+    "boop": ["👉", "👈"],
+    "highfive": ["🙌", "✋"],
+    "poke": ["😛", "👉"],
+    "bite": ["😈", "🦴"],
+    "tickle": ["😂", "🤣"],
+    "punch": ["💥", "👊"],
+    "kick": ["🥾", "👟"],
+    "dance": ["🕺", "💃"],
+    "cry": ["😢", "💧"],
+    "blush": ["😊", "😳"],
+    "wave": ["👋", "🤙"],
+    "bonk": ["🔨", "😵"],
+    "stare": ["👀", "�"],
+    "laugh": ["😆", "🤣"],
+    "smug": ["😏", "😼"],
+    "sleep": ["😴", "🛌"],
+    "holdhands": ["🤝", "♥️"],
+    "feed": ["🍪", "🍰"],
+    "throw": ["🎯", "💨"],
+    "run": ["🏃", "💨"],
+    "scared": ["😱", "😨"],
+    "comfort": ["🤗", "🫂"],
+    "tease": ["😝", "😜"]
 }
 
-def pick_tail(action: str) -> str:
-    arr = CAPTION_TAILS.get(action.lower()) or CAPTION_TAILS["_default"]
-    return random.choice(arr)
+# pastel colors per action for nicer embeds
+for i, action in enumerate(ACTIONS):
+    ACTION_COLORS[action] = PASTEL_COLORS[i % len(PASTEL_COLORS)]
 
-# ------------------------------------------------------------------------------------
-# Intents / Bot
-# ------------------------------------------------------------------------------------
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-intents.reactions = True
+# cute suffixes to add Owo flavor
+CUTE_SUFFIXES = [
+    "uwu", "owo", "nya~", ">w<", ".w.", "^_^", "♥", "💖", "✨", "｡◕‿◕｡",
+    "owo~", "♡", "🌸", "�", "💫", "♥️"
+]
 
-bot = commands.Bot(command_prefix="none", intents=intents)
+# ======================================================================================================================
+# FALLBACK GIF DICTIONARY
+# ======================================================================================================================
+# Each action must contain at least 10 links. These are curated anime-style GIF links from public giphy/gif hosts.
+# If you want to replace links with Tenor equivalents, feel free to update this list.
+# Note: avoid posting copyrighted content in public repos. Keep keys private.
+FALLBACK_GIFS: Dict[str, List[str]] = {
+    "hug": [
+        "https://media.giphy.com/media/l2QDM9Jnim1YVILXa/giphy.gif",
+        "https://media.giphy.com/media/od5H3PmEG5EVq/giphy.gif",
+        "https://media.giphy.com/media/143v0Z4767T15e/giphy.gif",
+        "https://media.giphy.com/media/sUIZWMnfd4Mb6/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif",
+        "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+        "https://media.giphy.com/media/49mdjsMrH7oze/giphy.gif",
+        "https://media.giphy.com/media/5eyhBKLvYhafu/giphy.gif",
+        "https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif",
+        "https://media.giphy.com/media/13YrHUvPzUUmkM/giphy.gif"
+    ],
+    "slap": [
+        "https://media.giphy.com/media/Gf3AUz3eBNbTW/giphy.gif",
+        "https://media.giphy.com/media/jLeyZWgtwgr2U/giphy.gif",
+        "https://media.giphy.com/media/Zau0yrl17uzdK/giphy.gif",
+        "https://media.giphy.com/media/11rWoZNpAKw8w/giphy.gif",
+        "https://media.giphy.com/media/3o6Mbbs879ozZ9Yic0/giphy.gif",
+        "https://media.giphy.com/media/fO6UtDy5pWYwM/giphy.gif",
+        "https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/giphy.gif",
+        "https://media.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "pat": [
+        "https://media.giphy.com/media/109ltuoSQT212w/giphy.gif",
+        "https://media.giphy.com/media/4HP0ddZnNVvKU/giphy.gif",
+        "https://media.giphy.com/media/osYdfUptPqV0s/giphy.gif",
+        "https://media.giphy.com/media/ArLxZ4PebH2Ug/giphy.gif",
+        "https://media.giphy.com/media/ye7OTQgwmVuVy/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/l3vR6D5Q4Z8d2/giphy.gif",
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif"
+    ],
+    "kiss": [
+        "https://media.giphy.com/media/G3va31oEEnIkM/giphy.gif",
+        "https://media.giphy.com/media/FqBTvSNjNzeZG/giphy.gif",
+        "https://media.giphy.com/media/bGm9FuBCGg4SY/giphy.gif",
+        "https://media.giphy.com/media/11k3oaUjSlFR4I/giphy.gif",
+        "https://media.giphy.com/media/l41lQ2UaJ7y2K/giphy.gif",
+        "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+        "https://media.giphy.com/media/Z1kpfgtHmpR8k/giphy.gif",
+        "https://media.giphy.com/media/5b8I6Z9z0b5iQ/giphy.gif",
+        "https://media.giphy.com/media/3ohhwytHcusSCXXOUg/giphy.gif",
+        "https://media.giphy.com/media/8q0JH2Qh3Vf0k/giphy.gif"
+    ],
+    "cuddle": [
+        "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif",
+        "https://media.giphy.com/media/3Z1Yj0iXySA2o/giphy.gif",
+        "https://media.giphy.com/media/13YrHUvPzUUmkM/giphy.gif",
+        "https://media.giphy.com/media/QGc8RgR0J5Na/giphy.gif",
+        "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt6ML6BklcajjsA/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+        "https://media.giphy.com/media/1BXa2alBjrCXC/giphy.gif"
+    ],
+    "boop": [
+        "https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif",
+        "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif",
+        "https://media.giphy.com/media/12hvLuZ7uzvCvK/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+        "https://media.giphy.com/media/yoJC2Olx0ekMy2b8bW/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/3ornjXbo3g39Ljjgso/giphy.gif",
+        "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif"
+    ],
+    "highfive": [
+        "https://media.giphy.com/media/3o6ZtpxSZbQRRnwCKQ/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+        "https://media.giphy.com/media/xT0Gqd2hM4bCj3Q3D6/giphy.gif",
+        "https://media.giphy.com/media/3o7TKx3S1KMK1nXyLe/giphy.gif",
+        "https://media.giphy.com/media/l0Ex7FJwX9G0qS3a0/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/3o6Zs4p0o6gqg/giphy.gif",
+        "https://media.giphy.com/media/1BXa2alBjrCXC/giphy.gif"
+    ],
+    "poke": [
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/ZqlvCTNHpqrio/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/26u4b45b8KlgAB7iM/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ],
+    "bite": [
+        "https://media.giphy.com/media/11rWoZNpAKw8w/giphy.gif",
+        "https://media.giphy.com/media/KI9oNS4JBemyI/giphy.gif",
+        "https://media.giphy.com/media/10UeedrT5MIfPG/giphy.gif",
+        "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3o7btPfuT1ewy8vCAk/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ],
+    "tickle": [
+        "https://media.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif",
+        "https://media.giphy.com/media/xTiTnBoR36Gzkhp9bG/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+        "https://media.giphy.com/media/26u4b45b8KlgAB7iM/giphy.gif",
+        "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif"
+    ],
+    "punch": [
+        "https://media.giphy.com/media/l3q2K5jinAlChoCLS/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif"
+    ],
+    "kick": [
+        "https://media.giphy.com/media/TgKEpC5NdGvIY/giphy.gif",
+        "https://media.giphy.com/media/hvRJCLFzcasrR4ia7z/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/xTiTnJ2m2k0bVb3Gx6/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif"
+    ],
+    "dance": [
+        "https://media.giphy.com/media/3oriO7A7bt1wsEP4cw/giphy.gif",
+        "https://media.giphy.com/media/l41YtZOb9EUABnuqA/giphy.gif",
+        "https://media.giphy.com/media/5PhDdJfLt4FXe/giphy.gif",
+        "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif"
+    ],
+    "cry": [
+        "https://media.giphy.com/media/d2lcHJTG5Tscg/giphy.gif",
+        "https://media.giphy.com/media/ROF8OQvDmxytW/giphy.gif",
+        "https://media.giphy.com/media/26gssIytJvy1b1THO/giphy.gif",
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif"
+    ],
+    "blush": [
+        "https://media.giphy.com/media/xUOwGqzY13pWf6I1vi/giphy.gif",
+        "https://media.giphy.com/media/fQZX2aoRC1Tqw/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/5PhDdJfLt4FXe/giphy.gif",
+        "https://media.giphy.com/media/13YrHUvPzUUmkM/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif"
+    ],
+    "wave": [
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif",
+        "https://media.giphy.com/media/2YbG2d4pXQGXS/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "bonk": [
+        "https://media.giphy.com/media/j3iGKfXRKlLqw/giphy.gif",
+        "https://media.giphy.com/media/MWSRkVoNaC30A/giphy.gif",
+        "https://media.giphy.com/media/26gssIytJvy1b1THO/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/3o6Zt8MgUuvSbkZYWc/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif"
+    ],
+    "stare": [
+        "https://media.giphy.com/media/XreQmk7ETCak0/giphy.gif",
+        "https://media.giphy.com/media/3o7btYFgbkD2MPkzVu/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif"
+    ],
+    "laugh": [
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+        "https://media.giphy.com/media/3o7btPfuT1ewy8vCAk/giphy.gif",
+        "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3o7aCTPPm4OHfRLSH6/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif"
+    ],
+    "smug": [
+        "https://media.giphy.com/media/3o7btNR05vVYlfaU6Y/giphy.gif",
+        "https://media.giphy.com/media/VbnUQpnihPSIgIXuZv/giphy.gif",
+        "https://media.giphy.com/media/1BXa2alBjrCXC/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "sleep": [
+        "https://media.giphy.com/media/fnlXXGImVWB0RYWWQj/giphy.gif",
+        "https://media.giphy.com/media/3o7TKsQj4X3cJpGRNm/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "holdhands": [
+        "https://media.giphy.com/media/l0MYB8Ory7Hqefo9a/giphy.gif",
+        "https://media.giphy.com/media/VbnUQpnihPSIgIXuZv/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "feed": [
+        "https://media.giphy.com/media/26uflHj8UQ33JmUqA/giphy.gif",
+        "https://media.giphy.com/media/10UeedrT5MIfPG/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ],
+    "throw": [
+        "https://media.giphy.com/media/13CoXDiaCcCoyk/giphy.gif",
+        "https://media.giphy.com/media/3o7TKx3S1KMK1nXyLe/giphy.gif",
+        "https://media.giphy.com/media/26gssIytJvy1b1THO/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "run": [
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/3o6ZsX2w6n2CE3Y8VW/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ],
+    "scared": [
+        "https://media.giphy.com/media/XpgOZHuDfIkoM/giphy.gif",
+        "https://media.giphy.com/media/3og0IPxMM0erATueVW/giphy.gif",
+        "https://media.giphy.com/media/26gssIytJvy1b1THO/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif"
+    ],
+    "comfort": [
+        "https://media.giphy.com/media/49mdjsMrH7oze/giphy.gif",
+        "https://media.giphy.com/media/13YrHUvPzUUmkM/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/l0MYEqEzwMWFCg8rm/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif",
+        "https://media.giphy.com/media/26tPplGWjN0xLybiU/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ],
+    "tease": [
+        "https://media.giphy.com/media/xT1XGYy9NPhWRPp6uA/giphy.gif",
+        "https://media.giphy.com/media/3o7btYFgbkD2MPkzVu/giphy.gif",
+        "https://media.giphy.com/media/3o7qDXK7zK6pt5Q9hW/giphy.gif",
+        "https://media.giphy.com/media/26u4b45b8KlgAB7iM/giphy.gif",
+        "https://media.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
+        "https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif",
+        "https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif",
+        "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",
+        "https://media.giphy.com/media/5GoVLqeAOo6PK/giphy.gif"
+    ]
+}
 
-# Optional: console logging
-discord.utils.setup_logging()
+# ======================================================================================================================
+# VALIDATION: ensure every action has at least 10 gifs; if not, pad with generic gifs
+# ======================================================================================================================
+for action in ACTIONS:
+    arr = FALLBACK_GIFS.get(action, [])
+    # ensure uniqueness
+    uniq = []
+    for u in arr:
+        if u and u not in uniq:
+            uniq.append(u)
+    # pad to at least 10 using GENERIC_FALLBACK_GIFS
+    i = 0
+    while len(uniq) < 10 and i < len(GENERIC_FALLBACK_GIFS):
+        candidate = GENERIC_FALLBACK_GIFS[i]
+        if candidate not in uniq:
+            uniq.append(candidate)
+        i += 1
+    FALLBACK_GIFS[action] = uniq[:max(10, len(uniq))]
 
-# ------------------------------------------------------------------------------------
-# Utilities: File I/O
-# ------------------------------------------------------------------------------------
-def load_json(path: str, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+# ======================================================================================================================
+# REGEX FOR PARSING MESSAGES
+# ======================================================================================================================
+# Support forms:
+#   dso hug@user
+#   dso hug @user
+#   hug@user
+#   hug @user
+#   dso F.C (help)
+# We'll use robust regex to capture target tokens, including mention form <@!12345> and raw id.
+ACTION_PATTERN_NO_SPACE = re.compile(
+    rf"(?P<prefix>dso\s+)?(?P<action>{'|'.join(re.escape(a) for a in ACTIONS)})@(?P<target><@!?\d+>|\d+|[^\s]+)",
+    re.IGNORECASE
+)
+ACTION_PATTERN_SPACE = re.compile(
+    rf"(?P<prefix>dso\s+)?(?P<action>{'|'.join(re.escape(a) for a in ACTIONS)})\s+(?P<target><@!?\d+>|\d+|[^\s]+)",
+    re.IGNORECASE
+)
+HELP_PATTERN = re.compile(r"^dso\s+f\.?c\.?$", re.IGNORECASE)  # matches dso F.C or dso fc or dso f.c
 
-def save_json(path: str, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+MENTION_RE = re.compile(r"<@!?(?P<id>\d+)>")
 
-# ------------------------------------------------------------------------------------
-# Global Stores
-# ------------------------------------------------------------------------------------
-# actions_store: { action_name: {"gifs":[...], "aliases":[...]} }
-actions_store: Dict[str, Dict[str, List[str]]] = load_json(ACTIONS_FILE, {})
+# ======================================================================================================================
+# UTILITIES
+# ======================================================================================================================
 
-# Ensure defaults exist
-_changed = False
-for name in DEFAULT_ACTION_NAMES:
-    if name not in actions_store:
-        actions_store[name] = {"gifs": [], "aliases": []}
-        _changed = True
-if _changed:
-    save_json(ACTIONS_FILE, actions_store)
+def now_ts() -> float:
+    return time.time()
 
-# guild_store: { str(gid): {"enabled":bool,"fun_channel":int|None,"auto_react":bool,"cooldown":int} }
-guild_store: Dict[str, Dict] = load_json(GUILD_FILE, {})
+def get_cooldown_remaining(user_id: int, action: str) -> float:
+    key = (user_id, action)
+    last = _COOLDOWNS.get(key, 0.0)
+    elapsed = now_ts() - last
+    if elapsed < COOLDOWN_SECONDS:
+        return COOLDOWN_SECONDS - elapsed
+    return 0.0
 
-# stats_store structure:
-# { "global":{"uses":0,"actions":{...}}, "guilds":{gid:{"uses":0,"actions":{...}}}, "users":{uid:{"uses":0}} }
-stats_store: Dict = load_json(STATS_FILE, {"global": {"uses": 0, "actions": {}}, "guilds": {}, "users": {}})
+def set_cooldown(user_id: int, action: str) -> None:
+    _COOLDOWNS[(user_id, action)] = now_ts()
 
-# favorites: { uid: { action: [gif_url,...] } }
-favorites_store: Dict[str, Dict[str, List[str]]] = load_json(FAVS_FILE, {})
+def compact(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
-# suggestions: [ { "guild": gid, "user": uid, "action": text, "time": epoch } ]
-suggestions_store: List[Dict] = load_json(SUGGEST_FILE, [])
+def owoify_caption(caption: str) -> str:
+    caption = compact(caption or "")
+    lower = caption.lower()
+    for token in ("uwu", "owo", "nya", "♥", "💖", "✨"):
+        if token in lower:
+            return caption
+    r = random.random()
+    if r < 0.35:
+        caption = f"{caption} {random.choice(CUTE_SUFFIXES)}"
+    elif r < 0.65:
+        caption = f"{caption} ❤️"
+    if len(caption) > 280:
+        caption = caption[:277] + "..."
+    return caption
 
-# ------------------------------------------------------------------------------------
-# Tenor API
-# ------------------------------------------------------------------------------------
-TENOR_SEARCH_URL = "https://tenor.googleapis.com/v2/search"
+def build_header_line(author_name: str, action: str, target_name: str) -> str:
+    endings = ["", ".-.", ">w<", ".w.", " owo", " uwu", " ^_^", " ._.", "-.-"]
+    end = random.choice(endings)
+    header = f"{author_name} {action}s {target_name} {end}"
+    return compact(header)
 
-async def fetch_tenor_gifs(query: str, limit: int = 15) -> List[dict]:
-    """Return a list of media_formats blocks (we'll pick best match for 1:1)."""
-    if not TENOR_API_KEY or TENOR_API_KEY == "YOUR_TENOR_API_KEY":
+def add_recent_gif(guild_id: int, gif_url: str) -> None:
+    key = str(guild_id)
+    arr = _RECENT_GIFS.get(key, [])
+    if gif_url in arr:
+        arr.remove(gif_url)
+    arr.insert(0, gif_url)
+    if len(arr) > RECENT_GIF_RETENTION:
+        arr = arr[:RECENT_GIF_RETENTION]
+    _RECENT_GIFS[key] = arr
+
+def get_recent_gifs(guild_id: int) -> List[str]:
+    return _RECENT_GIFS.get(str(guild_id), [])
+
+# ======================================================================================================================
+# TENOR CACHING & FETCHING (optional, used only if TENOR_API_KEY is set)
+# ======================================================================================================================
+
+def tenor_cache_get(query: str) -> Optional[List[str]]:
+    ent = _TENOR_CACHE.get(query)
+    if not ent:
+        return None
+    ts, urls = ent
+    if now_ts() - ts > CACHE_TTL:
+        _TENOR_CACHE.pop(query, None)
+        return None
+    return list(urls)
+
+def tenor_cache_set(query: str, urls: List[str]) -> None:
+    _TENOR_CACHE[query] = (now_ts(), list(urls)[:MAX_GIF_CANDIDATES])
+
+async def fetch_tenor_gifs_async(query: str, limit: int = TENOR_REQUEST_LIMIT) -> List[str]:
+    """
+    Fetch gif URLs from Tenor v2 API using TENOR_API_KEY.
+    If TENOR_API_KEY is empty, returns empty list.
+    """
+    if not TENOR_API_KEY:
         return []
-
+    cached = tenor_cache_get(query)
+    if cached:
+        return cached
     params = {
         "q": query,
         "key": TENOR_API_KEY,
-        "limit": str(limit),
-        "media_filter": "gif",        # request at least the 'gif' format
-        "contentfilter": "high",
-        "random": "true"              # diversify results
+        "limit": limit,
+        "media_filter": "minimal"
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(TENOR_SEARCH_URL, params=params, timeout=20) as resp:
+            async with session.get(TENOR_SEARCH_URL, params=params, timeout=HTTP_TIMEOUT) as resp:
                 if resp.status != 200:
+                    try:
+                        body = await resp.text()
+                    except Exception:
+                        body = "<no body>"
+                    # Do not raise; return empty to fall back to local gifs
                     return []
                 data = await resp.json()
+                results = data.get("results", []) or []
+                urls = []
+                for r in results:
+                    media = r.get("media_formats", {}) or r.get("media", {})
+                    if isinstance(media, dict):
+                        for k in ("gif", "mediumgif", "tinygif", "nanogif"):
+                            entry = media.get(k)
+                            if isinstance(entry, dict):
+                                url = entry.get("url")
+                                if url:
+                                    urls.append(url)
+                                    break
+                    # fallback try to find any http string
+                    if not urls:
+                        for v in r.values():
+                            if isinstance(v, str) and v.startswith("http"):
+                                urls.append(v)
+                                break
+                # dedupe and trim
+                uniq = []
+                for u in urls:
+                    if u and u not in uniq:
+                        uniq.append(u)
+                    if len(uniq) >= limit:
+                        break
+                tenor_cache_set(query, uniq)
+                return uniq
     except Exception:
         return []
 
-    out = []
-    for item in data.get("results", []):
-        mf = item.get("media_formats", {})
-        if mf:
-            out.append(mf)
+# ======================================================================================================================
+# LOCAL CAPTION TEMPLATES (per action)
+# ======================================================================================================================
+# Each action has a list of caption templates. Placeholders:
+#   {author} -> author display name
+#   {target} -> target display name
+# The engine will choose one randomly and format it.
+CAPTION_TEMPLATES: Dict[str, List[str]] = {
+    "hug": [
+        "{author} gives {target} the warmest hug ever.",
+        "{author} hugs {target} tightly, like a cozy blanket.",
+        "{author} wraps {target} in a giant fluffy hug uwu.",
+        "{author} hugs {target} softly — so cute!",
+        "{author} snuggles {target} warmly {suffix}",
+        "{author} holds {target} close and hums a tiny tune.",
+        "{author} hugs {target} like there’s no tomorrow.",
+        "{author} gives {target} a comforting squeeze {suffix}",
+        "{author} embraces {target} with all the love they have.",
+        "{author} hugs {target} till the stars come out."
+    ],
+    "slap": [
+        "{author} slaps {target} — dramatic anime style!",
+        "{author} gives {target} a light, comedic slap.",
+        "{author} slaps {target} across the face — ouch!",
+        "{author} executes an epic slap move on {target} {suffix}",
+        "{author} lightly slaps {target} — it's just a prank!",
+        "{author} delivers a swift anime-style slap to {target}.",
+        "{author} slaps {target} and everybody gasps.",
+        "{author} slaps {target} gently (not too hard).",
+        "{author} performs the legendary slap technique on {target}.",
+        "{author} slaps {target} with dramatic sound effects!"
+    ],
+    "pat": [
+        "{author} pats {target} on the head gently.",
+        "{author} gives {target} a reassuring pat.",
+        "{author} pats {target} — good job!",
+        "{author} pats {target} like a proud mentor {suffix}",
+        "{author} does a tiny pat for {target}.",
+        "{author} pats {target} softly, squeak.",
+        "{author} pats {target} with approval.",
+        "{author} gives {target} the sweetest little pat.",
+        "{author} pats {target} — so wholesome.",
+        "{author} gives a gentle pat to {target}."
+    ],
+    "kiss": [
+        "{author} gives {target} a gentle kiss.",
+        "{author} kisses {target} softly {suffix}",
+        "{author} pecks {target} on the cheek.",
+        "{author} steals a kiss from {target}!",
+        "{author} gives {target} a cute smooch.",
+        "{author} kisses {target} under the stars.",
+        "{author} gives {target} a cinematic anime kiss.",
+        "{author} kisses {target} gently and blushes.",
+        "{author} catches {target} by surprise with a sweet kiss.",
+        "{author} pecks {target} and grins."
+    ],
+    "cuddle": [
+        "{author} cuddles {target} like two marshmallows.",
+        "{author} cuddles {target} on the couch {suffix}",
+        "{author} invites {target} for a cozy cuddle session.",
+        "{author} and {target} cuddle and watch anime.",
+        "{author} snuggles {target} warmly.",
+        "{author} cuddles {target} while humming softly.",
+        "{author} cuddles {target} until sleep.",
+        "{author} holds {target} close for a long cuddle.",
+        "{author} wraps {target} in warm cuddles.",
+        "{author} gives {target} the ultimate cuddle."
+    ],
+    "boop": [
+        "{author} boops {target} on the nose {suffix}",
+        "{author} gives {target} an adorable boop.",
+        "{author} boops {target} — squeak!",
+        "{author} gently boops {target}'s nose.",
+        "{author} boops {target} with tiny fingers.",
+        "{author} executes a perfect nose-boop on {target}.",
+        "{author} boops {target} and everything is good.",
+        "{author} performs the infamous boop on {target}.",
+        "{author} gives {target} a playful boop.",
+        "{author} boops {target} and giggles."
+    ],
+    "highfive": [
+        "{author} high-fives {target} — bam!",
+        "{author} gives {target} a celebratory highfive {suffix}",
+        "{author} high-five for {target} — nice!",
+        "{author} slaps hands with {target} in excitement.",
+        "{author} and {target} high-five like champs.",
+        "{author} high-fives {target} to celebrate.",
+        "{author} gives {target} a big high-five.",
+        "{author} high-fives {target} energetically.",
+        "{author} high-fives {target} with style.",
+        "{author} shares a victory highfive with {target}."
+    ],
+    "poke": [
+        "{author} pokes {target} — hey!",
+        "{author} gives {target} a tiny poke.",
+        "{author} pokes {target} to get attention.",
+        "{author} pokes {target} gently {suffix}",
+        "{author} pokes {target} and waits.",
+        "{author} pokes {target} playfully.",
+        "{author} gives {target} a curious poke.",
+        "{author} pokes {target} with a feather.",
+        "{author} pokes {target} — nothing happens.",
+        "{author} pokes {target} again."
+    ],
+    "bite": [
+        "{author} playfully bites {target} {suffix}",
+        "{author} gives {target} a tiny nibble.",
+        "{author} bites {target} gently like a puppy.",
+        "{author} gives {target} a dramatic chomp!",
+        "{author} play-bites {target} affectionately.",
+        "{author} bites {target} but it's just love.",
+        "{author} gives {target} a friendly little bite.",
+        "{author} bites {target} and blushes.",
+        "{author} gives {target} a soft bite.",
+        "{author} attempts a gentle bite on {target}."
+    ],
+    "tickle": [
+        "{author} tickles {target} until they laugh.",
+        "{author} tickles {target} mercilessly {suffix}",
+        "{author} tickles {target} and both giggle.",
+        "{author} tickles {target} — squeals!",
+        "{author} tickles {target} playfully.",
+        "{author} tickles {target} to cheer them up.",
+        "{author} tickles {target} and then hugs them.",
+        "{author} tickles {target} softly.",
+        "{author} tickles {target} — can't stop laughing.",
+        "{author} tickles {target} with delight."
+    ],
+    "punch": [
+        "{author} lands a dramatic punch on {target}!",
+        "{author} throws a swift punch at {target}.",
+        "{author} punches {target} — anime impact!",
+        "{author} gives {target} a playful punch {suffix}",
+        "{author} punches {target} with exaggerated force.",
+        "{author} lands a heroic punch on {target}.",
+        "{author} punches {target} and time slows down.",
+        "{author} punches {target} with style.",
+        "{author} delivers a quick jab to {target}.",
+        "{author} punches {target} dramatically."
+    ],
+    "kick": [
+        "{author} kicks {target} with a flying move!",
+        "{author} performs a swift kick on {target}.",
+        "{author} kicks {target} — cinematic style!",
+        "{author} gives {target} a playful kick {suffix}",
+        "{author} kicks {target} and dust flies.",
+        "{author} lands a neat kick on {target}.",
+        "{author} kicks {target} like a pro.",
+        "{author} does a spin-kick on {target}.",
+        "{author} gives {target} a friendly kick.",
+        "{author} kicks {target} in a dramatic pose."
+    ],
+    "dance": [
+        "{author} dances with {target} joyfully.",
+        "{author} pulls {target} into a dance-off {suffix}",
+        "{author} and {target} break into synchronized dancing.",
+        "{author} shows off moves while dancing with {target}.",
+        "{author} dances with {target} like no one's watching.",
+        "{author} dances happily with {target}.",
+        "{author} invites {target} to a silly dance.",
+        "{author} dances with {target} under neon lights.",
+        "{author} dances with {target} and smiles.",
+        "{author} grooves with {target} to the beat."
+    ],
+    "cry": [
+        "{author} cries with {target} comforting them.",
+        "{author} sheds a tear while {target} offers comfort.",
+        "{author} cries dramatically (in a cute way).",
+        "{author} cries and {target} hands a tissue {suffix}",
+        "{author} cries softly while {target} watches.",
+        "{author} cries a little and takes a breath.",
+        "{author} cries but feels better next to {target}.",
+        "{author} cries and {target} gives a hug.",
+        "{author} cries but finds hope with {target}.",
+        "{author} cries and then laughs it off."
+    ],
+    "blush": [
+        "{author} blushes at {target}'s compliment {suffix}",
+        "{author} turns bright red and hides behind a hand.",
+        "{author} blushes while {target} grins.",
+        "{author} blushes awkwardly but it's cute.",
+        "{author} blushes and smiles shyly.",
+        "{author} blushes a little seeing {target}.",
+        "{author} blushes and looks away coyly.",
+        "{author} blushes in an adorable way.",
+        "{author} blushes while holding {target}'s hand.",
+        "{author} blushes and giggles softly."
+    ],
+    "wave": [
+        "{author} waves at {target} enthusiastically.",
+        "{author} gives {target} a friendly wave {suffix}",
+        "{author} waves with a big smile.",
+        "{author} waves slowly and cutely.",
+        "{author} waves from across the room.",
+        "{author} waves to catch {target}'s attention.",
+        "{author} waves and says hello.",
+        "{author} waves with both hands.",
+        "{author} waves shyly at {target}.",
+        "{author} waves cheerfully."
+    ],
+    "bonk": [
+        "{author} bonks {target} lightly on the head {suffix}",
+        "{author} executes a comedic bonk on {target}.",
+        "{author} bonks {target} with a soft toy.",
+        "{author} bonks {target} — meme style.",
+        "{author} bonks {target} for being silly.",
+        "{author} gives {target} a playful bonk.",
+        "{author} bonks {target} and they both laugh.",
+        "{author} bonks {target} with cartoon sound effects.",
+        "{author} bonks {target} gently on the noggin.",
+        "{author} bonks {target} softly and smiles."
+    ],
+    "stare": [
+        "{author} stares at {target} intensely.",
+        "{author} gives {target} a long, meaningful stare {suffix}",
+        "{author} stares and raises an eyebrow.",
+        "{author} stares like a mysterious anime character.",
+        "{author} stares until {target} reacts.",
+        "{author} stares playfully at {target}.",
+        "{author} stares with curiosity.",
+        "{author} stares and waits for {target} to blink.",
+        "{author} stares like it's a staring contest.",
+        "{author} stares and smiles slowly."
+    ],
+    "laugh": [
+        "{author} laughs with {target} until they cry.",
+        "{author} laughs at {target}'s joke {suffix}",
+        "{author} laughs loudly and heartily.",
+        "{author} laughs and claps with {target}.",
+        "{author} laughs so hard they snort.",
+        "{author} chuckles and grins at {target}.",
+        "{author} laughs with a gleam in their eye.",
+        "{author} laughs and pats {target} on the back.",
+        "{author} laughs together with {target}.",
+        "{author} laughs and spreads joy."
+    ],
+    "smug": [
+        "{author} smirks smugly at {target} {suffix}",
+        "{author} looks at {target} with a smug grin.",
+        "{author} gives {target} a playful smug stare.",
+        "{author} says 'I told you so' with a smug face.",
+        "{author} looks quite pleased with themselves around {target}.",
+        "{author} smirks and taps their chin.",
+        "{author} gives {target} a teasing, smug smile.",
+        "{author} looks smugly at {target}.",
+        "{author} smirks and walks away victorious.",
+        "{author} strikes a smug pose for {target}."
+    ],
+    "sleep": [
+        "{author} dozes off next to {target}. Zzz...",
+        "{author} drifts to sleep softly {suffix}",
+        "{author} snoozes while {target} watches peacefully.",
+        "{author} naps beside {target}.",
+        "{author} sleeps like a comfortable kitty.",
+        "{author} curls up and sleeps soundly.",
+        "{author} falls asleep mid-conversation.",
+        "{author} sleeps and dreams of {target}.",
+        "{author} sleeps with a soft smile.",
+        "{author} dozes peacefully."
+    ],
+    "holdhands": [
+        "{author} holds {target}'s hand warmly.",
+        "{author} and {target} hold hands while walking {suffix}",
+        "{author} clasps {target}'s hand gently.",
+        "{author} holds {target}'s hand and smiles.",
+        "{author} squeezes {target}'s hand softly.",
+        "{author} links fingers with {target}.",
+        "{author} holds hands and feels safe.",
+        "{author} holds hands in silence.",
+        "{author} holds {target}'s hand tenderly.",
+        "{author} holds hands and hums a tune."
+    ],
+    "feed": [
+        "{author} feeds {target} a tasty treat {suffix}",
+        "{author} offers {target} a cute snack.",
+        "{author} feeds {target} with a spoon.",
+        "{author} feeds {target} a slice of cake.",
+        "{author} feeds {target} like a loving friend.",
+        "{author} shares a snack with {target}.",
+        "{author} offers {target} some yummy food.",
+        "{author} feeds {target} and they smile.",
+        "{author} feeds {target} a chocolate bite.",
+        "{author} feeds {target} and they blush."
+    ],
+    "throw": [
+        "{author} throws {target} a playful object!",
+        "{author} tosses {target} across the screen (not serious).",
+        "{author} throws a plush at {target} {suffix}",
+        "{author} launches {target} into a soft tumble.",
+        "{author} throws {target} gently, all in fun.",
+        "{author} tosses something at {target}.",
+        "{author} throws a paper plane at {target}.",
+        "{author} playfully throws {target}'s hat.",
+        "{author} tosses {target} a ball of yarn.",
+        "{author} throws {target} into an imaginary pool."
+    ],
+    "run": [
+        "{author} runs away with {target} in tow!",
+        "{author} runs like the wind with {target} {suffix}",
+        "{author} and {target} sprint off laughing.",
+        "{author} jogs happily beside {target}.",
+        "{author} runs to catch {target}.",
+        "{author} runs toward an adventure with {target}.",
+        "{author} runs with excitement.",
+        "{author} dashes off and returns with snacks.",
+        "{author} runs and flings arms wide.",
+        "{author} runs while singing."
+    ],
+    "scared": [
+        "{author} shivers in fear and clutches {target}.",
+        "{author} looks scared and hides behind {target} {suffix}",
+        "{author} is startled and jumps.",
+        "{author} screams dramatically in fright.",
+        "{author} looks wide-eyed and scared.",
+        "{author} trembles a little with fear.",
+        "{author} gulps and holds {target}'s hand.",
+        "{author} hides behind {target} for safety.",
+        "{author} flinches and recovers.",
+        "{author} is spooked and then laughs it off."
+    ],
+    "comfort": [
+        "{author} comforts {target} with kind words {suffix}",
+        "{author} offers a caring embrace to {target}.",
+        "{author} sits with {target} and listens.",
+        "{author} wraps {target} in a warm blanket of support.",
+        "{author} holds {target} and whispers encouragement.",
+        "{author} comforts {target} until they smile.",
+        "{author} offers a shoulder to cry on.",
+        "{author} comforts {target} and offers tea.",
+        "{author} shares a calming hug with {target}.",
+        "{author} reassures {target} gently."
+    ],
+    "tease": [
+        "{author} teases {target} playfully {suffix}",
+        "{author} pokes fun at {target} but it's loving.",
+        "{author} teases {target} with a grin.",
+        "{author} makes a cheeky comment at {target}.",
+        "{author} teases {target} and winks.",
+        "{author} jokes around with {target}.",
+        "{author} teases {target} gently.",
+        "{author} rib-tickles {target} with teasing words.",
+        "{author} teases {target} and laughs.",
+        "{author} teases {target} in a cute way."
+    ]
+}
+
+# ======================================================================================================================
+# MESSAGE HANDLING PIPELINE
+# ======================================================================================================================
+
+async def resolve_member(guild: Optional[discord.Guild], token: str) -> Optional[discord.Member]:
+    """
+    Resolve a token to a discord.Member. Accepts:
+      - mention: <@123456789>
+      - id: 123456789
+      - username#discriminator
+      - display name
+    """
+    if not guild:
+        return None
+    token = (token or "").strip()
+    m = MENTION_RE.match(token)
+    if m:
+        try:
+            uid = int(m.group("id"))
+            member = guild.get_member(uid)
+            if member:
+                return member
+        except Exception:
+            pass
+    # raw id
+    if token.isdigit():
+        try:
+            member = guild.get_member(int(token))
+            if member:
+                return member
+        except Exception:
+            pass
+    # username#discriminator exact match
+    lowered = token.lower()
+    for mem in guild.members:
+        combo = f"{mem.name}#{mem.discriminator}".lower()
+        if combo == lowered or mem.display_name.lower() == lowered or mem.name.lower() == lowered:
+            return mem
+    return None
+
+async def choose_gif_for_action(guild: Optional[discord.Guild], action: str, session: Optional[aiohttp.ClientSession]=None) -> Optional[str]:
+    """
+    Choose a gif URL for the given action.
+    Strategy:
+      1. If TENOR_API_KEY is set, attempt to fetch Tenor gifs for the action query.
+      2. If Tenor returns results, deduplicate and pick one preferring freshness (not in recent list).
+      3. If Tenor is unavailable or returns too few, fallback to FALLBACK_GIFS[action].
+    """
+    gifs: List[str] = []
+    query = f"{action} anime"
+    if TENOR_API_KEY and session:
+        try:
+            # Reuse the session to call Tenor
+            params = {"q": query, "key": TENOR_API_KEY, "limit": TENOR_REQUEST_LIMIT, "media_filter": "minimal"}
+            async with session.get(TENOR_SEARCH_URL, params=params, timeout=HTTP_TIMEOUT) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    results = data.get("results", []) or []
+                    for r in results:
+                        media = r.get("media_formats", {}) or r.get("media", {})
+                        url = None
+                        if isinstance(media, dict):
+                            for k in ("gif", "mediumgif", "tinygif", "nanogif"):
+                                entry = media.get(k)
+                                if isinstance(entry, dict):
+                                    url = entry.get("url")
+                                    if url:
+                                        gifs.append(url)
+                                        break
+                        if not url:
+                            # sniff any http string in r
+                            for v in r.values():
+                                if isinstance(v, str) and v.startswith("http"):
+                                    gifs.append(v)
+                                    break
+        except Exception:
+            # Tenor failed, ignore and fallback
+            gifs = []
+
+    # De-duplicate and trim
+    uniq = []
+    for u in gifs:
+        if u and u not in uniq:
+            uniq.append(u)
+        if len(uniq) >= MAX_GIF_CANDIDATES:
+            break
+    gifs = uniq
+
+    # If insufficient, use fallback list
+    if not gifs or len(gifs) < 3:
+        gifs = FALLBACK_GIFS.get(action, [])[:]
+
+    # prefer fresh gifs not in recent
+    guild_id = getattr(guild, "id", 0)
+    recent = get_recent_gifs(guild_id)
+    for u in gifs:
+        if u not in recent:
+            add_recent_gif(guild_id, u)
+            return u
+    # all are recent -> rotate and pick first
+    chosen = gifs[0] if gifs else (GENERIC_FALLBACK_GIFS[0] if GENERIC_FALLBACK_GIFS else None)
+    if chosen:
+        add_recent_gif(guild_id, chosen)
+    return chosen
+
+async def generate_local_caption(action: str, author: str, target: str) -> str:
+    """
+    Select a local caption template for an action and format it.
+    Adds a random cute suffix occasionally.
+    """
+    templates = CAPTION_TEMPLATES.get(action, [])
+    if not templates:
+        # fallback generic
+        basic = f"{author} {action}s {target}"
+        if random.random() < 0.4:
+            basic = f"{basic} {random.choice(CUTE_SUFFIXES)}"
+        return basic
+    template = random.choice(templates)
+    suffix = random.choice(CUTE_SUFFIXES) if random.random() < 0.35 else ""
+    out = template.format(author=author, target=target, suffix=suffix)
+    out = compact(out)
+    out = owoify_caption(out)
     return out
 
-def pick_best_gif_url(media_formats: dict) -> Optional[str]:
+async def send_owo_style(channel: discord.TextChannel, author: discord.Member, target: discord.Member, action: str, session: Optional[aiohttp.ClientSession]=None):
     """
-    Try to prefer a square (1:1) GIF if Tenor provides dims. Otherwise, return 'gif' url.
-    Tenor v2 'gif' object may include 'dims': [w, h]. Not always present, so be defensive.
+    Compose and send the owo-style response:
+      1) Header line (bold) + caption (plain text)
+      2) Small sleep (very short) then embed with GIF only
+      3) Add reactions to embed message
     """
-    # If there are multiple gif-like keys, check them all for dims.
-    candidates = []
-    for key, obj in media_formats.items():
-        if not isinstance(obj, dict):
-            continue
-        url = obj.get("url")
-        dims = obj.get("dims") or obj.get("size")  # dims is usually [w, h]; size is bytes
-        if url and isinstance(media_formats.get("gif", {}), dict):  # ensure gif exists
-            if isinstance(dims, list) and len(dims) == 2:
-                w, h = dims
-                candidates.append((abs(int(w) - int(h)), url))  # diff from square
-            else:
-                # unknown dims, treat as non-square candidate with large diff
-                candidates.append((10_000, url))
-
-    if candidates:
-        candidates.sort(key=lambda t: t[0])  # smallest diff first -> closest to 1:1
-        return candidates[0][1]
-
-    # Fallback: plain gif url if present
-    gif_obj = media_formats.get("gif")
-    if isinstance(gif_obj, dict) and gif_obj.get("url"):
-        return gif_obj["url"]
-    return None
-
-async def ensure_action_gifs_cached(action: str, force_min: int = 1, refill_to: int = 10) -> None:
-    """
-    Ensure we hold a small cache for this action. If below force_min, fetch and cache up to refill_to.
-    We still fetch fresh sets on demand during usage; this is just to keep it snappy like OWO.
-    """
-    entry = actions_store.setdefault(action, {"gifs": [], "aliases": []})
-    have = entry.get("gifs", [])
-    if len(have) >= force_min:
+    if not channel:
         return
 
-    media_sets = await fetch_tenor_gifs(f"anime {action} gif", limit=max(refill_to, 10))
-    picked_urls: List[str] = []
-    for mf in media_sets:
-        url = pick_best_gif_url(mf)
-        if url:
-            picked_urls.append(url)
-
-    if picked_urls:
-        # merge + dedupe, keep most recent first
-        merged = picked_urls + have
-        deduped, seen = [], set()
-        for u in merged:
-            if u not in seen:
-                deduped.append(u)
-                seen.add(u)
-        entry["gifs"] = deduped[:refill_to]
-        save_json(ACTIONS_FILE, actions_store)
-
-# ------------------------------------------------------------------------------------
-# Anti-Spam / Cooldown
-# ------------------------------------------------------------------------------------
-USER_LAST_USE: Dict[int, float] = {}
-USER_BURST: Dict[int, List[float]] = defaultdict(list)
-BURST_WINDOW = 8.0
-BURST_LIMIT  = 5
-
-def guild_cooldown(gid: int) -> int:
-    cfg = guild_store.get(str(gid), {})
-    return int(cfg.get("cooldown", 5))
-
-def can_use_now(uid: int, gid: int) -> Tuple[bool, Optional[str]]:
-    now = time.time()
-    last = USER_LAST_USE.get(uid, 0.0)
-    cd = guild_cooldown(gid)
-    if now - last < cd:
-        return False, f"Cooldown {cd}s — slow down."
-
-    q = USER_BURST[uid]
-    q[:] = [t for t in q if now - t <= BURST_WINDOW]
-    if len(q) >= BURST_LIMIT:
-        return False, "Too many actions at once. Take a breath 😮‍💨"
-    return True, None
-
-def record_use(uid: int):
-    now = time.time()
-    USER_LAST_USE[uid] = now
-    USER_BURST[uid].append(now)
-
-# ------------------------------------------------------------------------------------
-# Stats Helpers
-# ------------------------------------------------------------------------------------
-def inc_stats(gid: int, action: str, uid: int):
-    # Global
-    g = stats_store.setdefault("global", {"uses": 0, "actions": {}})
-    g["uses"] = int(g.get("uses", 0)) + 1
-    ga = g.setdefault("actions", {})
-    ga[action] = int(ga.get(action, 0)) + 1
-
-    # Guild
-    gkey = str(gid)
-    gg = stats_store.setdefault("guilds", {}).setdefault(gkey, {"uses": 0, "actions": {}})
-    gg["uses"] = int(gg.get("uses", 0)) + 1
-    gga = gg.setdefault("actions", {})
-    gga[action] = int(gga.get(action, 0)) + 1
-
-    # User
-    ukey = str(uid)
-    u = stats_store.setdefault("users", {}).setdefault(ukey, {"uses": 0})
-    u["uses"] = int(u.get("uses", 0)) + 1
-
-    save_json(STATS_FILE, stats_store)
-
-# ------------------------------------------------------------------------------------
-# Paginator View (unchanged, correct signatures)
-# ------------------------------------------------------------------------------------
-class Paginator(discord.ui.View):
-    def __init__(self, pages: List[discord.Embed], author_id: int, timeout: int = 120):
-        super().__init__(timeout=timeout)
-        self.pages = pages
-        self.index = 0
-        self.author_id = author_id
-
-    async def _ensure(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the requester can use these controls.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        self.index = (self.index - 1) % len(self.pages)
-        await interaction.followup.edit_message(interaction.message.id, embed=self.pages[self.index], view=self)
-
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        self.index = (self.index + 1) % len(self.pages)
-        await interaction.followup.edit_message(interaction.message.id, embed=self.pages[self.index], view=self)
-
-    @discord.ui.button(emoji="🔒", label="Close", style=discord.ButtonStyle.danger)
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        await interaction.followup.edit_message(interaction.message.id, view=self)
-
-# ------------------------------------------------------------------------------------
-# Action View (buttons under action embeds) — unchanged behavior, fixed signatures
-# ------------------------------------------------------------------------------------
-class ActionView(discord.ui.View):
-    """
-    Buttons:
-      • ❤️ React back  -> swap author/target and send embed (same/new gif)
-      • 🔁 Repeat      -> same direction, new random gif
-      • ⭐ Favorite    -> save current gif into user favorites for this action
-      • 🔀 Shuffle     -> edit current embed's image with a new gif
-      • 💀 Hide       -> delete message (ephemeral ack)
-      • 🔒 Close      -> disable all buttons
-    """
-
-    def __init__(self, author_id: int, target_id: int, action: str, gif_url: str, message_author_id: int):
-        super().__init__(timeout=120)
-        self.author_id = author_id
-        self.target_id = target_id
-        self.action = action
-        self.gif_url = gif_url or ""
-        self.owner_id = message_author_id  # original sender
-
-    def _allowed_any(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id in (self.author_id, self.target_id, self.owner_id)
-
-    async def _deny(self, interaction: discord.Interaction):
-        await interaction.response.send_message("You can’t use these buttons for this action.", ephemeral=True)
-
-    def _guild_members(self, interaction: discord.Interaction) -> Tuple[Optional[discord.Member], Optional[discord.Member], Optional[discord.Member]]:
-        guild = interaction.guild
-        if not guild:
-            return None, None, None
-        author = guild.get_member(self.author_id)
-        target = guild.get_member(self.target_id)
-        invoker = guild.get_member(self.owner_id)
-        return author, target, invoker
-
-    def _random_gif(self) -> str:
-        gifs = actions_store.get(self.action, {}).get("gifs", [])
-        return random.choice(gifs) if gifs else (self.gif_url or "")
-
-    @discord.ui.button(label="❤️ React back", style=discord.ButtonStyle.primary)
-    async def react_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer(thinking=True)
-        author, target, _ = self._guild_members(interaction)
-        if not author or not target:
-            return await interaction.followup.send("Context lost.", ephemeral=True)
-        embed = discord.Embed(
-            color=discord.Color.random(),
-        )
-        caption = f"{target.display_name} {self.action}s {author.display_name}!! {pick_tail(self.action)}"
-        embed.set_author(name=caption, icon_url=target.display_avatar.url if target else discord.Embed.Empty)
-        embed.set_image(url=self.gif_url or self._random_gif())
-        embed.set_footer(text=EMBED_FOOTER)
-        await interaction.followup.send(embed=embed)
-
-    @discord.ui.button(label="🔁 Repeat", style=discord.ButtonStyle.secondary)
-    async def repeat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer(thinking=True)
-        author, target, _ = self._guild_members(interaction)
-        if not author or not target:
-            return await interaction.followup.send("Context lost.", ephemeral=True)
-        pick = self._random_gif()
-        embed = discord.Embed(color=discord.Color.random())
-        caption = f"{author.display_name} {self.action}s {target.display_name}!! {pick_tail(self.action)}"
-        embed.set_author(name=caption, icon_url=author.display_avatar.url if author else discord.Embed.Empty)
-        embed.set_image(url=pick)
-        embed.set_footer(text=EMBED_FOOTER)
-        await interaction.followup.send(embed=embed)
-
-    @discord.ui.button(label="⭐ Favorite", style=discord.ButtonStyle.success)
-    async def favorite(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer(ephemeral=True)
-        uid = str(interaction.user.id)
-        favs = favorites_store.setdefault(uid, {})
-        arr = favs.setdefault(self.action, [])
-        url = self.gif_url or self._random_gif()
-        if url in arr:
-            return await interaction.followup.send("Already in your favorites.", ephemeral=True)
-        if len(arr) >= 25:
-            return await interaction.followup.send("Favorites limit reached for this action (25).", ephemeral=True)
-        arr.append(url)
-        save_json(FAVS_FILE, favorites_store)
-        await interaction.followup.send("Added to your favorites ⭐", ephemeral=True)
-
-    @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary)
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer()
-        new_url = self._random_gif()
-        if not interaction.message:
-            return await interaction.followup.send("No message context.", ephemeral=True)
-        embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed(color=discord.Color.random())
-        embed.set_image(url=new_url)
-        embed.set_footer(text=EMBED_FOOTER)
-        self.gif_url = new_url
-        await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
-
-    @discord.ui.button(label="💀 Hide", style=discord.ButtonStyle.danger)
-    async def hide(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer(ephemeral=True)
+    # cooldown enforcement
+    rem = get_cooldown_remaining(author.id, action)
+    if rem > 0:
         try:
-            if interaction.message:
-                await interaction.message.delete()
-                await interaction.followup.send("🫥 Message hidden.", ephemeral=True)
-            else:
-                await interaction.followup.send("Nothing to hide.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.followup.send("I don’t have permission to delete that.", ephemeral=True)
+            await channel.send(f"⏳ <@{author.id}>, wait `{int(rem)}`s before using `{action}` again.")
         except Exception:
-            await interaction.followup.send("Couldn’t hide the message.", ephemeral=True)
+            pass
+        return
+    set_cooldown(author.id, action)
 
-    @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.secondary)
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_any(interaction):
-            return await self._deny(interaction)
-        await interaction.response.defer()
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        if interaction.message:
-            await interaction.followup.edit_message(interaction.message.id, view=self)
+    # choose gif
+    chosen = None
+    try:
+        # provide a fresh session if not provided
+        if session:
+            chosen = await choose_gif_for_action(channel.guild, action, session=session)
+        else:
+            # open a local session
+            async with aiohttp.ClientSession() as s:
+                chosen = await choose_gif_for_action(channel.guild, action, session=s)
+    except Exception:
+        # fallback to local resource
+        arr = FALLBACK_GIFS.get(action, []) or GENERIC_FALLBACK_GIFS
+        chosen = arr[0] if arr else (GENERIC_FALLBACK_GIFS[0] if GENERIC_FALLBACK_GIFS else None)
 
-# ------------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------------
-def is_admin(member: discord.Member) -> bool:
-    return bool(member.guild_permissions.administrator)
+    if not chosen:
+        chosen = GENERIC_FALLBACK_GIFS[0] if GENERIC_FALLBACK_GIFS else None
 
-def parse_mention_id(text: str) -> Optional[int]:
-    m = re.search(r"<@!?(\d+)>", text)
-    return int(m.group(1)) if m else None
+    # generate caption
+    caption = await generate_local_caption(action, author.display_name, target.display_name)
 
-def split_chained_parts(after_dso: str) -> List[str]:
-    return re.split(r"\s+then\s+", after_dso.strip(), flags=re.IGNORECASE)
+    # header line
+    header = build_header_line(author.display_name, action, target.display_name)
 
-def resolve_action(name: str) -> Optional[str]:
-    """Resolve an action from its name or alias; returns canonical action name."""
-    name = name.lower()
-    if name in actions_store:
-        return name
-    for act, data in actions_store.items():
-        aliases = data.get("aliases", [])
-        if name in [a.lower() for a in aliases]:
-            return act
-    return None
+    # send header + caption
+    try:
+        text_msg = f"**{header}**\n{caption}"
+        sent_text = await channel.send(text_msg)
+    except Exception:
+        sent_text = None
 
-async def build_and_send_action(
-    channel: discord.abc.Messageable,
-    author: discord.Member,
-    target: discord.Member,
-    action: str,
-    auto_record_stats: bool = True
-):
+    # send gif embed
+    try:
+        color = ACTION_COLORS.get(action, random.choice(PASTEL_COLORS))
+        embed = discord.Embed(color=color)
+        if chosen:
+            try:
+                embed.set_image(url=chosen)
+            except Exception:
+                # if embed fails, send as plain url
+                try:
+                    sent_image = await channel.send(chosen)
+                except Exception:
+                    sent_image = None
+            else:
+                sent_image = await channel.send(embed=embed)
+        else:
+            sent_image = None
+    except Exception:
+        sent_image = None
+
+    # add recent gif entry (already done inside choose_gif_for_action, but ensure)
+    try:
+        add_recent_gif(channel.guild.id if channel.guild else 0, chosen)
+    except Exception:
+        pass
+
+    # add reactions for vibe
+    try:
+        reactions = ACTION_REACTIONS.get(action, [])[:MAX_REACTIONS]
+        if sent_image:
+            for r in reactions:
+                try:
+                    await sent_image.add_reaction(r)
+                except Exception:
+                    pass
+        elif sent_text:
+            for r in reactions:
+                try:
+                    await sent_text.add_reaction(r)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# ======================================================================================================================
+# HELP EMBED: dso F.C
+# ======================================================================================================================
+def build_help_embed() -> discord.Embed:
     """
-    Sends an OWO-style embed:
-      [Author Avatar] "<Author> <action>s <Target>!! <random tail>"
-      GIF below (prefer 1:1)
-      Footer fixed
+    Build the 'dso F.C' embed listing actions grouped by category.
     """
-    # Make sure we have some cached GIFs; if not, fetch & cache
-    await ensure_action_gifs_cached(action, force_min=1, refill_to=10)
+    title = "💫 D.S.O Fun Command List"
+    desc = "**Usage:** `dso <action> @user` or `<action>@user` or `<action> @user`\n\n" \
+           "Try commands like `dso hug @user` or `hug@user` — it's Owo-style!\n"
+    embed = discord.Embed(title=title, description=desc, color=random.choice(PASTEL_COLORS))
+    # categories
+    soft = ["hug", "pat", "cuddle", "kiss", "holdhands", "comfort", "feed", "boop"]
+    actiony = ["slap", "punch", "kick", "bonk", "bite", "throw", "run", "punch"]
+    playful = ["tickle", "tease", "poke", "highfive", "laugh", "dance", "smug"]
+    mood = ["cry", "blush", "wave", "stare", "scared", "sleep"]
+    # add fields
+    embed.add_field(name="🤝 Cute / Soft", value=", ".join(soft), inline=False)
+    embed.add_field(name="⚔️ Action / Battle", value=", ".join(actiony), inline=False)
+    embed.add_field(name="🎭 Playful / Fun", value=", ".join(playful), inline=False)
+    embed.add_field(name="😳 Emotional / Mood", value=", ".join(mood), inline=False)
+    embed.set_footer(text=f"{len(ACTIONS)} total fun actions — type `dso <action> @user` to try one! uwu")
+    return embed
 
-    # Pick a URL from cache; if cache somehow empty, fetch live once
-    gifs = actions_store.get(action, {}).get("gifs", [])
-    if not gifs:
-        media_sets = await fetch_tenor_gifs(f"anime {action} gif", limit=12)
-        picks = []
-        for mf in media_sets:
-            u = pick_best_gif_url(mf)
-            if u:
-                picks.append(u)
-        if picks:
-            actions_store[action]["gifs"] = picks[:10]
-            save_json(ACTIONS_FILE, actions_store)
-            gifs = actions_store[action]["gifs"]
-
-    gif = random.choice(gifs) if gifs else None
-
-    caption = f"{author.display_name} {action}s {target.display_name}!! {pick_tail(action)}"
-    embed = discord.Embed(color=discord.Color.random())
-    embed.set_author(name=caption, icon_url=author.display_avatar.url if author else discord.Embed.Empty)
-    if gif:
-        embed.set_image(url=gif)
-    embed.set_footer(text=EMBED_FOOTER)
-
-    view = ActionView(author.id, target.id, action, gif or "", message_author_id=author.id)
-    msg = await channel.send(embed=embed, view=view)
-
-    if auto_record_stats:
-        inc_stats(author.guild.id, action, author.id)
-    return msg
-
-# ------------------------------------------------------------------------------------
-# Help text
-# ------------------------------------------------------------------------------------
-HELP_TEXT = (
-    "**D.S.O Fun Commands (prefixless / slashless):**\n"
-    "`dso enable F.C` — set fun channel via mention prompt (admin)\n"
-    "`dso disable F.C` — disable fun commands in guild (admin)\n"
-    "`dso settings` — view/edit settings (auto-react, cooldown)\n"
-    "`dso add-action <name>` — fetch 15 Tenor GIFs and add globally (admin)\n"
-    "`dso remove-action <name>` — remove an action globally (admin)\n"
-    "`dso alias <action> <alias>` — add alias for action (admin)\n"
-    "`dso action-list` — list all actions with gif counts (paged)\n"
-    "`dso stats` — show usage stats (guild + global)\n"
-    "`dso suggest <action>` — suggest a new action\n"
-    "`dso favs` — your favorites (paged)\n"
-    "`dso fav-use <action>` — send a random favorite gif of that action\n"
-    "\n**Use an action:**\n"
-    "`dso <action> @user` — e.g., `dso hug @user`\n"
-    "`dso <action> @user then <action> then <action>` — chaining with the same target\n"
-)
-
-def build_settings_embed(gid: int) -> discord.Embed:
-    cfg = guild_store.get(str(gid), {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5})
-    ch = cfg.get("fun_channel")
-    e = discord.Embed(title="D.S.O Settings", color=discord.Color.blurple())
-    e.add_field(name="Enabled", value=str(bool(cfg.get("enabled", False))), inline=True)
-    e.add_field(name="Fun Channel", value=f"<#{ch}>" if ch else "Not set", inline=True)
-    e.add_field(name="Auto React", value="On" if cfg.get("auto_react", True) else "Off", inline=True)
-    e.add_field(name="Cooldown (s)", value=str(cfg.get("cooldown", 5)), inline=True)
-    e.set_footer(text=EMBED_FOOTER)
-    return e
-
-class SettingsView(discord.ui.View):
-    def __init__(self, guild_id: int, author_id: int):
-        super().__init__(timeout=120)
-        self.gid = str(guild_id)
-        self.author_id = author_id
-
-    async def _ensure(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the admin who opened settings can modify them.", ephemeral=True)
-            return False
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Only admins can change settings.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Toggle Auto-React", style=discord.ButtonStyle.primary)
-    async def toggle_auto(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        cfg = guild_store.setdefault(self.gid, {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5})
-        cfg["auto_react"] = not cfg.get("auto_react", True)
-        save_json(GUILD_FILE, guild_store)
-        await interaction.followup.edit_message(interaction.message.id, embed=build_settings_embed(int(self.gid)), view=self)
-
-    @discord.ui.button(label="Cooldown -1s", style=discord.ButtonStyle.secondary)
-    async def cd_dec(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        cfg = guild_store.setdefault(self.gid, {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5})
-        cfg["cooldown"] = max(0, int(cfg.get("cooldown", 5)) - 1)
-        save_json(GUILD_FILE, guild_store)
-        await interaction.followup.edit_message(interaction.message.id, embed=build_settings_embed(int(self.gid)), view=self)
-
-    @discord.ui.button(label="Cooldown +1s", style=discord.ButtonStyle.secondary)
-    async def cd_inc(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        cfg = guild_store.setdefault(self.gid, {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5})
-        cfg["cooldown"] = min(30, int(cfg.get("cooldown", 5)) + 1)
-        save_json(GUILD_FILE, guild_store)
-        await interaction.followup.edit_message(interaction.message.id, embed=build_settings_embed(int(self.gid)), view=self)
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._ensure(interaction):
-            return
-        await interaction.response.defer()
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        await interaction.followup.edit_message(interaction.message.id, view=self)
-
-# ------------------------------------------------------------------------------------
-# Single on_message handler (prefixless "dso ..." flow)
-# ------------------------------------------------------------------------------------
-@bot.event
-async def on_message(message: discord.Message):
-    # Ignore bots and DMs
-    if not message.guild or message.author.bot:
+# ======================================================================================================================
+# MAIN ENTRYPOINT: handle_message_event(message)
+# ======================================================================================================================
+async def handle_message_event(message: discord.Message) -> None:
+    """
+    This function is the main export of this module.
+    Call it from your bot's on_message event.
+    It will:
+      - ignore bots
+      - ignore DMs
+      - respond to dso F.C help
+      - parse prefixless fun commands (dso hug@user, hug@user, hug @user)
+      - call send_owo_style for valid actions
+    """
+    # basic guards
+    if not message or not getattr(message, "content", None):
+        return
+    if message.author.bot:
+        return
+    if message.channel.type == discord.ChannelType.private:
+        # ignore DMs
         return
 
     content = message.content.strip()
+    lc = content.lower()
 
-    # Quick "dso help"
-    if content.lower() == "dso help":
-        e = discord.Embed(title="D.S.O — Help", description=HELP_TEXT, color=discord.Color.green())
-        e.set_footer(text=EMBED_FOOTER)
+    # help command
+    if HELP_PATTERN.match(lc):
         try:
-            await message.channel.send(embed=e)
+            embed = build_help_embed()
+            await message.channel.send(embed=embed)
         except Exception:
-            pass
-        # continue to allow other "dso ..." to be handled too
-
-    if not content.lower().startswith("dso"):
-        return
-
-    gid = message.guild.id
-    gkey = str(gid)
-    cfg = guild_store.get(gkey, {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5})
-
-    after = content[3:].strip()
-
-    # --- Admin: enable F.C ----------------------------------------------------------
-    if re.fullmatch(r"enable\s+F\.C", after, flags=re.IGNORECASE):
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can run setup.")
-        await message.channel.send("Mention the channel where fun commands should work (e.g. #fun):")
-
-        def ch_check(m: discord.Message):
-            return m.author.id == message.author.id and m.channel.id == message.channel.id and m.channel_mentions
-
-        try:
-            reply = await bot.wait_for("message", check=ch_check, timeout=90)
-        except asyncio.TimeoutError:
-            return await message.channel.send("Setup timed out.")
-
-        fun_channel = reply.channel_mentions[0]
-        guild_store[gkey] = {"enabled": True, "fun_channel": fun_channel.id, "auto_react": True, "cooldown": 5}
-        save_json(GUILD_FILE, guild_store)
-        return await message.channel.send(f"✅ Fun Commands enabled in {fun_channel.mention}.")
-
-    # --- Admin: disable F.C ---------------------------------------------------------
-    if re.fullmatch(r"disable\s+F\.C", after, flags=re.IGNORECASE):
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can do that.")
-        guild_store[gkey] = {"enabled": False, "fun_channel": None, "auto_react": True, "cooldown": 5}
-        save_json(GUILD_FILE, guild_store)
-        return await message.channel.send("🚫 Fun Commands disabled for this server.")
-
-    # --- Settings card --------------------------------------------------------------
-    if re.fullmatch(r"settings", after, flags=re.IGNORECASE):
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can view/edit settings.")
-        embed = build_settings_embed(gid)
-        view = SettingsView(gid, message.author.id)
-        return await message.channel.send(embed=embed, view=view)
-
-    # --- Admin: add-action <name> ---------------------------------------------------
-    m_add = re.match(r"add-action\s+([a-zA-Z0-9_-]{2,24})$", after, flags=re.IGNORECASE)
-    if m_add:
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can add actions.")
-        action_name = m_add.group(1).lower()
-
-        await message.channel.send(f"Adding action `{action_name}`… fetching GIFs.")
-        media_sets = await fetch_tenor_gifs(f"anime {action_name} gif", limit=15)
-        urls: List[str] = []
-        for mf in media_sets:
-            u = pick_best_gif_url(mf)
-            if u:
-                urls.append(u)
-        if not urls:
-            return await message.channel.send("Couldn’t find GIFs right now. Try another action or later.")
-
-        entry = actions_store.setdefault(action_name, {"gifs": [], "aliases": []})
-        merged = urls + entry["gifs"]
-        deduped, seen = [], set()
-        for u in merged:
-            if u not in seen:
-                deduped.append(u)
-                seen.add(u)
-        entry["gifs"] = deduped[:15]
-        save_json(ACTIONS_FILE, actions_store)
-
-        return await message.channel.send(f"✅ Action `{action_name}` added with {len(entry['gifs'])} GIFs.")
-
-    # --- Admin: remove-action <name> -----------------------------------------------
-    m_rem = re.match(r"remove-action\s+([a-zA-Z0-9_-]{2,24})$", after, flags=re.IGNORECASE)
-    if m_rem:
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can remove actions.")
-        name = m_rem.group(1).lower()
-        canonical = resolve_action(name)
-        if not canonical:
-            return await message.channel.send("No such action.")
-        actions_store.pop(canonical, None)
-        save_json(ACTIONS_FILE, actions_store)
-        return await message.channel.send(f"🗑️ Removed action `{canonical}`.")
-
-    # --- Admin: alias <action> <alias> ---------------------------------------------
-    m_alias = re.match(r"alias\s+([a-zA-Z0-9_-]{2,24})\s+([a-zA-Z0-9_-]{2,24})$", after, flags=re.IGNORECASE)
-    if m_alias:
-        if not is_admin(message.author):
-            return await message.channel.send("Only admins can add aliases.")
-        action = resolve_action(m_alias.group(1))
-        alias  = m_alias.group(2).lower()
-        if not action:
-            return await message.channel.send("Base action not found.")
-        if alias in actions_store:
-            return await message.channel.send("Alias name conflicts with an existing action.")
-        entry = actions_store[action]
-        aliases = entry.setdefault("aliases", [])
-        if alias in [a.lower() for a in aliases]:
-            return await message.channel.send("Alias already present.")
-        aliases.append(alias)
-        save_json(ACTIONS_FILE, actions_store)
-        return await message.channel.send(f"🔗 Alias `{alias}` added for action `{action}`.")
-
-    # --- action-list (paged) --------------------------------------------------------
-    if re.fullmatch(r"action-list", after, flags=re.IGNORECASE):
-        names = sorted(actions_store.keys())
-        lines = []
-        for n in names:
-            cnt = len(actions_store[n].get("gifs", []))
-            aliases = actions_store[n].get("aliases", [])
-            alias_str = f" — aliases: {', '.join(aliases)}" if aliases else ""
-            lines.append(f"• **{n}** ({cnt}){alias_str}")
-        pages = []
-        for i in range(0, len(lines), 12):
-            chunk = lines[i:i+12]
-            e = discord.Embed(title="D.S.O Actions", description="\n".join(chunk) if chunk else "No entries.", color=discord.Color.purple())
-            e.set_footer(text=f"{EMBED_FOOTER} • Page {i//12 + 1}/{(len(lines)-1)//12 + 1}")
-            pages.append(e)
-        if not pages:
-            pages = [discord.Embed(title="D.S.O Actions", description="No entries.", color=discord.Color.purple())]
-        view = Paginator(pages, author_id=message.author.id)
-        return await message.channel.send(embed=pages[0], view=view)
-
-    # --- stats ----------------------------------------------------------------------
-    if re.fullmatch(r"stats", after, flags=re.IGNORECASE):
-        g = stats_store.get("guilds", {}).get(str(gid), {"uses": 0, "actions": {}})
-        g_actions: Dict[str,int] = g.get("actions", {})
-        g_top = ", ".join([f"{k}({v})" for k,v in Counter(g_actions).most_common(10)]) or "No data."
-
-        gl = stats_store.get("global", {"uses": 0, "actions": {}})
-        gg_actions: Dict[str,int] = gl.get("actions", {})
-        gg_top = ", ".join([f"{k}({v})" for k,v in Counter(gg_actions).most_common(10)]) or "No data."
-
-        e = discord.Embed(title="D.S.O Stats", color=discord.Color.gold())
-        e.add_field(name=f"Guild Uses ({message.guild.name})", value=str(g.get("uses", 0)), inline=False)
-        e.add_field(name="Top Guild Actions", value=g_top, inline=False)
-        e.add_field(name="Global Uses", value=str(gl.get("uses", 0)), inline=False)
-        e.add_field(name="Top Global Actions", value=gg_top, inline=False)
-        e.set_footer(text=EMBED_FOOTER)
-        return await message.channel.send(embed=e)
-
-    # --- suggest <action> -----------------------------------------------------------
-    m_sug = re.match(r"suggest\s+([a-zA-Z0-9_-]{2,24})$", after, flags=re.IGNORECASE)
-    if m_sug:
-        action = m_sug.group(1).lower()
-        suggestions_store.append({"guild": gid, "user": message.author.id, "action": action, "time": int(time.time())})
-        save_json(SUGGEST_FILE, suggestions_store)
-        return await message.channel.send(f"📨 Suggestion received for `{action}`. Thanks!")
-
-    # --- favorites list -------------------------------------------------------------
-    if re.fullmatch(r"favs", after, flags=re.IGNORECASE):
-        uid = str(message.author.id)
-        favs = favorites_store.get(uid, {})
-        lines = []
-        for act, urls in favs.items():
-            lines.append(f"**{act}** — {len(urls)}")
-        pages = []
-        for i in range(0, len(lines), 15):
-            chunk = lines[i:i+15]
-            e = discord.Embed(title=f"{message.author.display_name}'s Favorites", description="\n".join(chunk) if chunk else "No entries.", color=discord.Color.purple())
-            e.set_footer(text=f"{EMBED_FOOTER} • Page {i//15 + 1}/{(len(lines)-1)//15 + 1}")
-            pages.append(e)
-        if not pages:
-            pages = [discord.Embed(title=f"{message.author.display_name}'s Favorites", description="No entries.", color=discord.Color.purple())]
-        view = Paginator(pages, author_id=message.author.id)
-        return await message.channel.send(embed=pages[0], view=view)
-
-    # --- fav-use <action> -----------------------------------------------------------
-    m_favu = re.match(r"fav-use\s+([a-zA-Z0-9_-]{2,24})$", after, flags=re.IGNORECASE)
-    if m_favu:
-        act = m_favu.group(1).lower()
-        canon = resolve_action(act) or act
-        uid = str(message.author.id)
-        arr = favorites_store.get(uid, {}).get(canon, [])
-        if not arr:
-            return await message.channel.send("You have no favorites saved for that action.")
-        url = random.choice(arr)
-        embed = discord.Embed(color=discord.Color.random())
-        caption = f"{message.author.display_name} {canon}s … {pick_tail(canon)}"
-        embed.set_author(name=caption, icon_url=message.author.display_avatar.url)
-        embed.set_image(url=url)
-        embed.set_footer(text=EMBED_FOOTER)
-        view = ActionView(message.author.id, message.author.id, canon, url, message_author_id=message.author.id)
-        inc_stats(gid, canon, message.author.id)
-        return await message.channel.send(embed=embed, view=view)
-
-    # --- Gate by channel if enabled -------------------------------------------------
-    if cfg.get("enabled") and cfg.get("fun_channel"):
-        if message.channel.id != cfg["fun_channel"]:
-            return  # silent outside configured fun channel
-
-    # --------------------------------------------------------------------------------
-    # Action execution: "dso <action> @user [then <action> then <action> ...]"
-    # --------------------------------------------------------------------------------
-    parts = split_chained_parts(after)
-    target_member: Optional[discord.Member] = None
-
-    ok, why = can_use_now(message.author.id, message.guild.id)
-    if not ok:
-        try:
-            await message.add_reaction("💢")
-        except Exception:
-            pass
-        return await message.channel.send(why)
-
-    first_valid = True
-    for i, part in enumerate(parts):
-        segment = part.strip()
-        if not segment:
-            continue
-
-        m = re.match(r"([a-zA-Z0-9_-]+)(?:\s+<@!?(\d+)>)?$", segment)
-        if not m:
-            # Try to find mention anywhere
-            mention_id = parse_mention_id(segment)
-            if mention_id:
-                m2 = re.match(r"([a-zA-Z0-9_-]+)", segment)
-                if not m2:
-                    continue
-                action_raw = m2.group(1).lower()
-                mid = mention_id
-            else:
-                continue
-        else:
-            action_raw = m.group(1).lower()
-            mid = m.group(2)
-
-        action = resolve_action(action_raw) or action_raw
-
-        # First part must establish target
-        if i == 0:
-            if not mid:
-                mid2 = parse_mention_id(segment)
-                if mid2:
-                    mid = str(mid2)
-        if i == 0 and not mid:
+            try:                                                  await message.channel.send("D.S.O Fun Commands:\n" + ", ".join(ACTIONS))
+            except Exception:                                     pass                                      return                                                                                          # Try no-space pattern: hug@user or dso hug@user
+    m = ACTION_PATTERN_NO_SPACE.match(content)        if m:                                                 action = m.group("action").lower()                token = m.group("target")                         member = await resolve_member(message.guild, token)                                                 if member:
+            # open a session for Tenor (if needed)            if TENOR_API_KEY:                                     async with aiohttp.ClientSession() as session:
+                    await send_owo_style(message.channel, message.author, member, action, session=session)                                                        else:
+                await send_owo_style(message.channel, message.author, member, action, session=None)
             return
 
-        if mid:
-            try:
-                target_member = await message.guild.fetch_member(int(mid))
-            except Exception:
-                target_member = None
+    # Try space-separated pattern: hug @user
+    m2 = ACTION_PATTERN_SPACE.match(content)
+    if m2:
+        action = m2.group("action").lower()
+        token = m2.group("target")
+        member = await resolve_member(message.guild, token)
+        if member:                                            if TENOR_API_KEY:
+                async with aiohttp.ClientSession() as session:
+                    await send_owo_style(message.channel, message.author, member, action, session=session)                                                        else:
+                await send_owo_style(message.channel, message.author, member, action, session=None)
+            return                                
+    # No fun match found — ignore                     return
 
-        if not target_member:
-            return
-
-        # create action slot if not present (admin can fill GIFs later)
-        actions_store.setdefault(action, {"gifs": [], "aliases": []})
-        save_json(ACTIONS_FILE, actions_store)
-
-        ok2, why2 = can_use_now(message.author.id, message.guild.id)
-        if not ok2:
-            await message.channel.send(why2)
-            break
-
-        # React on the original message once for the first valid action
-        if first_valid and cfg.get("auto_react", True):
-            first_valid = False
-            try:
-                e1 = random.choice(REACTION_POOL)
-                e2 = random.choice(REACTION_POOL)
-                await message.add_reaction(e1)
-                await message.add_reaction(e2)
-            except Exception:
-                pass
-
-        await build_and_send_action(message.channel, message.author, target_member, action)
-        record_use(message.author.id)
-
-    # Allow any extension cogs to still process
-    await bot.process_commands(message)
-
-# ------------------------------------------------------------------------------------
-# Events
-# ------------------------------------------------------------------------------------
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("Fun Command System v1.2 (Auto-Tenor) ready.")
-    # Flush stores to disk
-    save_json(ACTIONS_FILE, actions_store)
-    save_json(GUILD_FILE, guild_store)
-    save_json(STATS_FILE, stats_store)
-    save_json(FAVS_FILE, favorites_store)
-    save_json(SUGGEST_FILE, suggestions_store)
-
-@bot.event
-async def on_error(event_method, *args, **kwargs):
-    print(f"[on_error] in {event_method}")
-
-@bot.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    # No re-trigger on edits
-    return
-
-@bot.event
-async def on_message_delete(message: discord.Message):
-    # Reserved for future cleanups
-    return
-
-# ------------------------------------------------------------------------------------
-# Run
-# ------------------------------------------------------------------------------------
-def start_fun_system():
-    if DISCORD_BOT_TOKEN == "YOUR_DISCORD_BOT_TOKEN" or TENOR_API_KEY == "YOUR_TENOR_API_KEY":
-        raise SystemExit("Set DISCORD_BOT_TOKEN and TENOR_API_KEY in the script or environment.")
-    return bot
+# ======================================================================================================================
+# EXTRA: optional command to list all actions as plain text (for environments where embeds fail)    # ======================================================================================================================                              async def send_plain_actions_list(channel: discord.TextChannel) -> None:
+    try:
+        text = "D.S.O Fun Actions:\n" + ", ".join(ACTIONS)
+        await channel.send(text)                      except Exception:
+        pass                                      
+# ======================================================================================================================
+# UTILITY: convenience function to quickly test this module
+# (Only used if someone runs this file directly - not recommended in production)
+# ======================================================================================================================
+if __name__ == "__main__":
+    print("This module is meant to be imported by your main bot file (bot.py).")
+    print("Place it next to bot.py and call `await handle_message_event(message)` from your on_message event.")
+    print(f"This fun module defines {len(ACTIONS)} actions and includes at least 10 gifs per action.")
+    # Print a short sample of GIFs for quick verification
+    for act in ACTIONS:
+        print(f"{act}: {len(FALLBACK_GIFS.get(act, []))} gifs (sample: {FALLBACK_GIFS.get(act, [GENERIC_FALLBACK_GIFS[0]])[0]})")                     
+# ======================================================================================================================
+# END OF FILE (fun.py)                            # ======================================================================================================================
