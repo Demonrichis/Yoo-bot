@@ -1,7 +1,19 @@
-# bot.py                                          # D.S.O BOT — Main Core File
-# This file links directly with fun.py and runs your full fun command system.                       # Version: v3.0 (Offline Owo Engine Edition)      # Author: Senor (for Demon)
-                                                  import discord                                    import asyncio                                    import logging                                    from fun import handle_message_event   # 👈 connects fun.py here                                                                                      # Optional: enable simple logs
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')                                                                         # ======================================================================================================================                              # CONFIGURATION
+# bot.py
+# D.S.O BOT — Main Core File
+# This file links directly with fun.py and runs your full fun command system.
+# Version: v3.0 (Offline Owo Engine Edition)
+# Author: Senor (for Demon)
+
+import discord
+import asyncio
+import logging
+from fun import handle_message_event   # 👈 connects fun.py here
+
+# Optional: enable simple logs
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
+# ======================================================================================================================
+# CONFIGURATION
 # ======================================================================================================================
 
 # 🔑 Your bot token here
@@ -56,3 +68,4 @@ if __name__ == "__main__":
 # ======================================================================================================================
 # END OF FILE (bot.py)
 # ======================================================================================================================
+
