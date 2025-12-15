@@ -1,0 +1,13 @@
+{
+  "DISCORD_TOKEN": "PASTE_DISCORD_BOT_TOKEN_HERE",
+  "YOUTUBE_API_KEY": "PASTE_YOUTUBE_API_KEY_HERE",
+  "MEME_CHANNEL_ID": 123456789012345678,
+  "POST_INTERVAL_HOURS": 12,
+  "SEARCH_KEYWORDS": [
+    "funny memes shorts",
+    "discord memes shorts",
+    "india memes shorts",
+    "programming memes shorts"
+  ],
+  "MAX_RESULTS": 25
+}
